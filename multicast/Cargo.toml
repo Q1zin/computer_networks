@@ -7,3 +7,5 @@ edition = "2024"
 socket2 = { version = "0.6.1" }
 lazy_static = "1.0"
 uuid-rs = { version = "0.6.4", features = ["rnd"] }
+log = "0.4.28"
+simple_logger = "5.0.0"

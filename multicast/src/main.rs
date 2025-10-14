@@ -8,6 +8,7 @@ use std::mem::MaybeUninit;
 use uuid_rs::v4;
 use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use log::{LevelFilter, info, error};
 
 lazy_static! {
     static ref MESSAGE_TEXT: Mutex<String> = Mutex::new(String::from("Hello from client"));
@@ -150,18 +151,18 @@ fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
 fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
     
-    println!("[SERVER] Starting multicast listener on {}:{}", MCAST_ADDR, PORT);
-    println!("[SERVER] Instance ID: {}", instance_id);
+    info!("[SERVER] Starting multicast listener on {}:{}", MCAST_ADDR, PORT);
+    info!("[SERVER] Instance ID: {}", instance_id);
     
     let listener = match join_multicast(mcast_addr) {
         Ok(sock) => sock,
         Err(e) => {
-            eprintln!("[SERVER] Failed to join multicast group: {}", e);
+            error!("[SERVER] Failed to join multicast group: {}", e);
             return;
         }
     };
     
-    println!("[SERVER] Successfully joined multicast group, waiting for messages...");
+    info!("[SERVER] Successfully joined multicast group, waiting for messages...");
     
     let mut buf = [MaybeUninit::<u8>::uninit(); 1024];
     
@@ -185,16 +186,16 @@ fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
                             _ => "UNKNOWN",
                         };
                         
-                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                        println!("[SERVER] Received message from {:?}", remote_socket);
-                        println!("Type: {} ({})", msg_type_str, msg.msg_type);
-                        println!("Length: {} bytes", msg.length);
-                        println!("UUID: {}", msg.uuid);
-                        println!("Text: {}", msg.text);
-                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        info!("[SERVER] Received message from {:?}", remote_socket);
+                        info!("Type: {} ({})", msg_type_str, msg.msg_type);
+                        info!("Length: {} bytes", msg.length);
+                        info!("UUID: {}", msg.uuid);
+                        info!("Text: {}", msg.text);
+                        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                     }
                     Err(e) => {
-                        eprintln!("[SERVER] Failed to deserialize message: {}", e);
+                        error!("[SERVER] Failed to deserialize message: {}", e);
                     }
                 }
             }
@@ -202,25 +203,30 @@ fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
                 continue;
             }
             Err(e) => {
-                eprintln!("[SERVER] Error receiving: {}", e);
+                error!("[SERVER] Error receiving: {}", e);
             }
         }
     }
-    
-    println!("[SERVER] Shutting down");
+
+    info!("[SERVER] Shutting down");
+}
+
+fn stop_server(server_stop_flag: Arc<AtomicBool>) {
+    info!("[STOP SERVER] Stopping server...");
+    server_stop_flag.store(true, Ordering::Relaxed);
 }
 
 fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
     
     thread::sleep(Duration::from_millis(500));
-    
-    println!("[CLIENT] Starting multicast sender");
-    
+
+    info!("[CLIENT] Starting multicast sender");
+
     let sender = match create_sender(&mcast_addr) {
         Ok(sock) => sock,
         Err(e) => {
-            eprintln!("[CLIENT] Failed to create sender socket: {}", e);
+            error!("[CLIENT] Failed to create sender socket: {}", e);
             return;
         }
     };
@@ -228,8 +234,8 @@ fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let sock_addr = SockAddr::from(mcast_addr);
     let mut counter = 0;
     
-    println!("[CLIENT] Sending messages to {}:{} every 3 seconds...", MCAST_ADDR, PORT);
-    
+    info!("[CLIENT] Sending messages to {}:{} every 3 seconds...", MCAST_ADDR, PORT);
+
     while !stop_flag.load(Ordering::Relaxed) {
         counter += 1;
         
@@ -252,15 +258,15 @@ fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
                             1 => "DISCONNECT",
                             _ => "UNKNOWN",
                         };
-                        println!("[CLIENT] Sent {} bytes (type: {}): {}", bytes_sent, msg_type_str, message.text);
+                        info!("[CLIENT] Sent {} bytes (type: {}): {}", bytes_sent, msg_type_str, message.text);
                     }
                     Err(e) => {
-                        eprintln!("[CLIENT] Failed to send: {}", e);
+                        error!("[CLIENT] Failed to send: {}", e);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[CLIENT] Failed to serialize message: {}", e);
+                error!("[CLIENT] Failed to serialize message: {}", e);
             }
         }
         
@@ -272,21 +278,61 @@ fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
         }
     }
     
-    println!("[CLIENT] Shutting down");
+    send_disconnect_message(&sender, &sock_addr, &instance_id);
+
+    info!("[CLIENT] Shutting down");
+}
+
+fn send_disconnect_message(sender: &Socket, sock_addr: &SockAddr, instance_id: &str) {
+    let text = MESSAGE_TEXT.lock().unwrap().clone();
+    
+    let disconnect_msg = Message {
+        msg_type: MSG_TYPE_DISCONNECT,
+        length: text.len() as u16,
+        uuid: instance_id.to_string(),
+        text: format!("{} - Disconnecting", text),
+    };
+    
+    match disconnect_msg.serialize() {
+        Ok(data) => {
+            match sender.send_to(&data, sock_addr) {
+                Ok(bytes_sent) => {
+                    info!("[CLIENT] Sent DISCONNECT message ({} bytes): {}", bytes_sent, disconnect_msg.text);
+                }
+                Err(e) => {
+                    error!("[CLIENT] Failed to send disconnect: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            error!("[CLIENT] Failed to serialize disconnect message: {}", e);
+        }
+    }
+}
+
+fn disconnect(client_stop_flag: Arc<AtomicBool>) {
+    info!("[DISCONNECT] Stopping client and sending disconnect message...");
+    client_stop_flag.store(true, Ordering::Relaxed);
 }
 
 fn main() {
+    simple_logger::SimpleLogger::new()
+        .with_level(LevelFilter::Info)
+        .init()
+        .unwrap();
+
     let instance_id = generate_instance_id();
 
-    let running = Arc::new(AtomicBool::new(false));
+    let server_running = Arc::new(AtomicBool::new(false));
+    let client_running = Arc::new(AtomicBool::new(false));
 
-    let server_flag = Arc::clone(&running);
+    let server_flag = Arc::clone(&server_running);
     let server_id = instance_id.clone();
     let server_handle = thread::spawn(move || {
         server_thread(server_flag, server_id);
     });
 
-    let client_flag = Arc::clone(&running);
+    let client_flag = Arc::clone(&client_running);
     let client_id = instance_id.clone();
     let client_handle = thread::spawn(move || {
         client_thread(client_flag, client_id);
@@ -294,11 +340,12 @@ fn main() {
 
     thread::sleep(Duration::from_secs(30));
 
-    println!("\n=== Stopping ===");
-    running.store(true, Ordering::Relaxed);
+    info!("\n=== Stopping ===\n");
+    disconnect(Arc::clone(&client_running));
+    stop_server(Arc::clone(&server_running));
 
     let _ = server_handle.join();
     let _ = client_handle.join();
 
-    println!("Done!");
+    info!("Done!");
 }
