@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::mem::MaybeUninit;
+use uuid_rs::v4;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -63,10 +64,11 @@ fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
     Ok(socket)
 }
 
-fn server_thread(stop_flag: Arc<AtomicBool>) {
+fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
     
     println!("[SERVER] Starting multicast listener on {}:{}", MCAST_ADDR, PORT);
+    println!("[SERVER] Instance ID: {}", instance_id);
     
     let listener = match join_multicast(mcast_addr) {
         Ok(sock) => sock,
@@ -89,6 +91,10 @@ fn server_thread(stop_flag: Arc<AtomicBool>) {
                 let message = String::from_utf8_lossy(data);
                 let remote_socket = remote_addr.as_socket();
                 
+                if message.starts_with(&instance_id) {
+                    continue;
+                }
+                
                 println!("[SERVER] Received from {:?}: {}", remote_socket, message);
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
@@ -103,7 +109,7 @@ fn server_thread(stop_flag: Arc<AtomicBool>) {
     println!("[SERVER] Shutting down");
 }
 
-fn client_thread(stop_flag: Arc<AtomicBool>) {
+fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
     
     thread::sleep(Duration::from_millis(500));
@@ -125,8 +131,8 @@ fn client_thread(stop_flag: Arc<AtomicBool>) {
     
     while !stop_flag.load(Ordering::Relaxed) {
         counter += 1;
-        let message = format!("Message #{} from client", counter);
-        
+        let message = format!("{}Message #{} from client", instance_id, counter);
+
         match sender.send_to(message.as_bytes(), &sock_addr) {
             Ok(bytes_sent) => {
                 println!("[CLIENT] Sent {} bytes: {}", bytes_sent, message);
@@ -147,17 +153,25 @@ fn client_thread(stop_flag: Arc<AtomicBool>) {
     println!("[CLIENT] Shutting down");
 }
 
+fn generate_instance_id() -> String {
+    v4!().to_string()
+}
+
 fn main() {
+    let instance_id = generate_instance_id();
+
     let running = Arc::new(AtomicBool::new(false));
 
     let server_flag = Arc::clone(&running);
+    let server_id = instance_id.clone();
     let server_handle = thread::spawn(move || {
-        server_thread(server_flag);
+        server_thread(server_flag, server_id);
     });
 
     let client_flag = Arc::clone(&running);
+    let client_id = instance_id.clone();
     let client_handle = thread::spawn(move || {
-        client_thread(client_flag);
+        client_thread(client_flag, client_id);
     });
 
     thread::sleep(Duration::from_secs(30));

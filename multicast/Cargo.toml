@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 socket2 = { version = "0.6.1" }
 lazy_static = "1.0"
+uuid-rs = { version = "0.6.4", features = ["rnd"] }
