@@ -1,16 +1,99 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::mem::MaybeUninit;
 use uuid_rs::v4;
-
+use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-const MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 123);
-const PORT: u16 = 7645;
+lazy_static! {
+    static ref MESSAGE_TEXT: Mutex<String> = Mutex::new(String::from("Hello from client"));
+}
+
+const MSG_TYPE_HEARTBEAT: u8 = 0;
+const MSG_TYPE_DISCONNECT: u8 = 1;
+
+const MAX_MESSAGE_SIZE: usize = 500;
+
+const MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+const PORT: u16 = 8888;
+
+fn generate_instance_id() -> String {
+    v4!().to_string()
+}
+
+#[derive(Debug)]
+struct Message {
+    msg_type: u8,
+    length: u16,
+    uuid: String,
+    text: String,
+}
+
+impl Message {
+    fn serialize(&self) -> io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        
+        buffer.push(self.msg_type);
+        
+        if self.text.len() > MAX_MESSAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Message too long: {} bytes (max {})", self.text.len(), MAX_MESSAGE_SIZE)
+            ));
+        }
+        
+        let text_bytes = self.text.as_bytes();
+        let length = text_bytes.len() as u16;
+        buffer.extend_from_slice(&length.to_be_bytes());
+        buffer.extend_from_slice(self.uuid.as_bytes());
+        buffer.extend_from_slice(text_bytes);
+        
+        Ok(buffer)
+    }
+    
+    fn deserialize(data: &[u8]) -> io::Result<Self> {
+        if data.len() < 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Data too short for message header"
+            ));
+        }
+        
+        let msg_type = data[0];
+        
+        let length = u16::from_be_bytes([data[1], data[2]]);
+        
+        if data.len() < 3 + 36 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Data too short for UUID"
+            ));
+        }
+        
+        let uuid = String::from_utf8_lossy(&data[3..39]).to_string();
+        
+        let text_end = 39 + length as usize;
+        if data.len() < text_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Data too short for message text: expected {}, got {}", text_end, data.len())
+            ));
+        }
+        
+        let text = String::from_utf8_lossy(&data[39..text_end]).to_string();
+        
+        Ok(Message {
+            msg_type,
+            length,
+            uuid,
+            text,
+        })
+    }
+}
 
 fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
     let domain = if addr.is_ipv4() {
@@ -88,14 +171,32 @@ fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
                 let data = unsafe {
                     std::slice::from_raw_parts(buf.as_ptr() as *const u8, len)
                 };
-                let message = String::from_utf8_lossy(data);
                 let remote_socket = remote_addr.as_socket();
                 
-                if message.starts_with(&instance_id) {
-                    continue;
+                match Message::deserialize(data) {
+                    Ok(msg) => {
+                        if msg.uuid == instance_id {
+                            continue;
+                        }
+                        
+                        let msg_type_str = match msg.msg_type {
+                            0 => "HEARTBEAT",
+                            1 => "DISCONNECT",
+                            _ => "UNKNOWN",
+                        };
+                        
+                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        println!("[SERVER] Received message from {:?}", remote_socket);
+                        println!("Type: {} ({})", msg_type_str, msg.msg_type);
+                        println!("Length: {} bytes", msg.length);
+                        println!("UUID: {}", msg.uuid);
+                        println!("Text: {}", msg.text);
+                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    }
+                    Err(e) => {
+                        eprintln!("[SERVER] Failed to deserialize message: {}", e);
+                    }
                 }
-                
-                println!("[SERVER] Received from {:?}: {}", remote_socket, message);
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                 continue;
@@ -131,14 +232,35 @@ fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     
     while !stop_flag.load(Ordering::Relaxed) {
         counter += 1;
-        let message = format!("{}Message #{} from client", instance_id, counter);
-
-        match sender.send_to(message.as_bytes(), &sock_addr) {
-            Ok(bytes_sent) => {
-                println!("[CLIENT] Sent {} bytes: {}", bytes_sent, message);
+        
+        let msg_type = MSG_TYPE_HEARTBEAT;
+        let text = MESSAGE_TEXT.lock().unwrap().clone();
+        
+        let message = Message {
+            msg_type,
+            length: text.len() as u16,
+            uuid: instance_id.clone(),
+            text: format!("{} #{}", text, counter),
+        };
+        
+        match message.serialize() {
+            Ok(data) => {
+                match sender.send_to(&data, &sock_addr) {
+                    Ok(bytes_sent) => {
+                        let msg_type_str = match msg_type {
+                            0 => "HEARTBEAT",
+                            1 => "DISCONNECT",
+                            _ => "UNKNOWN",
+                        };
+                        println!("[CLIENT] Sent {} bytes (type: {}): {}", bytes_sent, msg_type_str, message.text);
+                    }
+                    Err(e) => {
+                        eprintln!("[CLIENT] Failed to send: {}", e);
+                    }
+                }
             }
             Err(e) => {
-                eprintln!("[CLIENT] Failed to send: {}", e);
+                eprintln!("[CLIENT] Failed to serialize message: {}", e);
             }
         }
         
@@ -151,10 +273,6 @@ fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     }
     
     println!("[CLIENT] Shutting down");
-}
-
-fn generate_instance_id() -> String {
-    v4!().to_string()
 }
 
 fn main() {
