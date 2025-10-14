@@ -17,8 +17,23 @@ lazy_static! {
 pub const MSG_TYPE_HEARTBEAT: u8 = 0;
 pub const MSG_TYPE_DISCONNECT: u8 = 1;
 pub const MAX_MESSAGE_SIZE: usize = 500;
-pub const MCAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
-pub const PORT: u16 = 8888;
+
+#[derive(Clone, Debug)]
+pub struct MulticastConfig {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+    pub message: String,
+}
+
+impl Default for MulticastConfig {
+    fn default() -> Self {
+        Self {
+            ip: Ipv4Addr::new(239, 255, 255, 250),
+            port: 8888,
+            message: String::from("Hello from client"),
+        }
+    }
+}
 
 pub fn generate_instance_id() -> String {
     v4!().to_string()
@@ -146,10 +161,10 @@ pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
     Ok(socket)
 }
 
-pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
-    let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
+pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: MulticastConfig) {
+    let mcast_addr = SocketAddr::new(config.ip.into(), config.port);
     
-    info!("[SERVER] Starting multicast listener on {}:{}", MCAST_ADDR, PORT);
+    info!("[SERVER] Starting multicast listener on {}:{}", config.ip, config.port);
     info!("[SERVER] Instance ID: {}", instance_id);
     
     let listener = match join_multicast(mcast_addr) {
@@ -214,8 +229,8 @@ pub fn stop_server(server_stop_flag: Arc<AtomicBool>) {
     server_stop_flag.store(true, Ordering::Relaxed);
 }
 
-pub fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
-    let mcast_addr = SocketAddr::new(MCAST_ADDR.into(), PORT);
+pub fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: MulticastConfig) {
+    let mcast_addr = SocketAddr::new(config.ip.into(), config.port);
     
     thread::sleep(Duration::from_millis(500));
 
@@ -232,7 +247,9 @@ pub fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String) {
     let sock_addr = SockAddr::from(mcast_addr);
     let mut counter = 0;
     
-    info!("[CLIENT] Sending messages to {}:{} every 3 seconds...", MCAST_ADDR, PORT);
+    *MESSAGE_TEXT.lock().unwrap() = config.message.clone();
+    
+    info!("[CLIENT] Sending messages to {}:{} every 3 seconds...", config.ip, config.port);
 
     while !stop_flag.load(Ordering::Relaxed) {
         counter += 1;
