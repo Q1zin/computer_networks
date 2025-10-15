@@ -11,6 +11,8 @@ use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use log::{info, error};
 use if_addrs::get_if_addrs;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
 
 lazy_static! {
     pub static ref MESSAGE_TEXT: Mutex<String> = Mutex::new(String::from("Hello from client"));
@@ -149,54 +151,103 @@ pub fn get_active_device_count() -> usize {
     count
 }
 
-pub fn get_ipv6_interface_index(interface_name: Option<&str>) -> u32 {
+pub struct Ipv6InterfaceInfo {
+    pub index: u32,
+    pub name: String,
+}
+
+pub fn get_ipv6_interface(interface_name: Option<&str>) -> Option<Ipv6InterfaceInfo> {
     if let Some(name) = interface_name {
         match get_interface_index(name) {
             Ok(index) => {
                 info!("[IPv6] Using specified interface: {} (index: {})", name, index);
-                return index;
+                return Some(Ipv6InterfaceInfo {
+                    index,
+                    name: name.to_string(),
+                });
             }
             Err(e) => {
                 error!("[IPv6] Failed to get index for interface '{}': {}. Falling back to auto-detection.", name, e);
             }
         }
     }
-    
+
     find_ipv6_multicast_interface()
 }
 
-pub fn find_ipv6_multicast_interface() -> u32 {
+pub fn find_ipv6_multicast_interface() -> Option<Ipv6InterfaceInfo> {
     match get_if_addrs() {
         Ok(interfaces) => {
             for iface in interfaces.iter() {
                 if let IpAddr::V6(ipv6_addr) = iface.addr.ip() {
-                    if ipv6_addr.is_loopback() {
+                    if ipv6_addr.is_loopback() || ipv6_addr.is_unspecified() {
                         continue;
                     }
-                    
-                    if let Ok(index) = get_interface_index(&iface.name) {
-                        return index;
-                    }
-                }
-            }
-            
-            for iface in interfaces.iter() {
-                if let IpAddr::V6(ipv6_addr) = iface.addr.ip() {
-                    if !ipv6_addr.is_loopback() {
+
+                    if !ipv6_addr.is_unicast_link_local() {
                         if let Ok(index) = get_interface_index(&iface.name) {
-                            return index;
+                            return Some(Ipv6InterfaceInfo {
+                                index,
+                                name: iface.name.clone(),
+                            });
                         }
                     }
                 }
             }
-            
-            error!("[IPv6] No suitable IPv6 interface found, using default (0)");
-            0
+
+            for iface in interfaces.iter() {
+                if let IpAddr::V6(ipv6_addr) = iface.addr.ip() {
+                    if ipv6_addr.is_loopback() || ipv6_addr.is_unspecified() {
+                        continue;
+                    }
+
+                    if let Ok(index) = get_interface_index(&iface.name) {
+                        return Some(Ipv6InterfaceInfo {
+                            index,
+                            name: iface.name.clone(),
+                        });
+                    }
+                }
+            }
+
+            error!("[IPv6] No suitable IPv6 interface found");
+            None
         }
         Err(e) => {
             error!("[IPv6] Failed to get network interfaces: {}", e);
-            0
+            None
         }
+    }
+}
+
+fn bind_socket_to_ipv6_interface(socket: &Socket, interface_index: u32) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::mem::size_of;
+
+        let fd = socket.as_raw_fd();
+        let optval = interface_index as libc::c_uint;
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_BOUND_IF,
+                &optval as *const libc::c_uint as *const libc::c_void,
+                size_of::<libc::c_uint>() as libc::socklen_t,
+            )
+        };
+
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (socket, interface_index);
+        Ok(())
     }
 }
 
@@ -308,14 +359,23 @@ pub fn join_multicast(addr: SocketAddr, interface_name: Option<&str>) -> io::Res
             socket.join_multicast_v4(mdns_v4, &Ipv4Addr::new(0, 0, 0, 0))?;
         }
         IpAddr::V6(ref mdns_v6) => {
-            let interface_index = get_ipv6_interface_index(interface_name);
-            
-            if interface_index != 0 {
-                info!("[IPv6] Server using interface index {} for multicast join", interface_index);
+            let interface_info = get_ipv6_interface(interface_name);
+            let interface_index = interface_info.as_ref().map_or(0, |info| info.index);
+
+            if let Some(info) = interface_info.as_ref() {
+                info!(
+                    "[IPv6] Server using interface {} (index {}) for multicast join",
+                    info.name,
+                    info.index
+                );
             }
-            
+
             socket.join_multicast_v6(mdns_v6, interface_index)?;
             socket.set_only_v6(true)?;
+
+            if let Some(info) = interface_info {
+                bind_socket_to_ipv6_interface(&socket, info.index)?;
+            }
         }
     };
 
@@ -333,21 +393,18 @@ pub fn create_sender(addr: &SocketAddr, interface_name: Option<&str>) -> io::Res
             0,
         )))?;
     } else {
-        let is_link_local = if let IpAddr::V6(ref ipv6) = addr.ip() {
-            ipv6.segments()[0] & 0xff0f == 0xff02
+        let interface_info = get_ipv6_interface(interface_name);
+
+        if let Some(info) = interface_info.as_ref() {
+            info!(
+                "[IPv6] Client using interface {} (index {}) for multicast",
+                info.name,
+                info.index
+            );
+            socket.set_multicast_if_v6(info.index)?;
+            bind_socket_to_ipv6_interface(&socket, info.index)?;
         } else {
-            false
-        };
-        
-        let interface_index = if is_link_local || interface_name.is_some() {
-            get_ipv6_interface_index(interface_name)
-        } else {
-            0
-        };
-        
-        if interface_index != 0 {
-            info!("[IPv6] Using interface index {} for multicast", interface_index);
-            socket.set_multicast_if_v6(interface_index)?;
+            error!("[IPv6] No suitable interface found for multicast - sending may fail");
         }
         
         socket.set_multicast_loop_v6(true)?;

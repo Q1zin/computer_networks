@@ -78,9 +78,6 @@ fn start_multicast(
             while cleanup_flag.load(Ordering::Relaxed) {
                 thread::sleep(std::time::Duration::from_secs(2));
                 let removed = multicast::cleanup_inactive_devices(std::time::Duration::from_secs(14));
-                if !removed.is_empty() {
-                    println!("[CLEANUP] Removed {} inactive device(s)", removed.len());
-                }
             }
         });
         
@@ -234,11 +231,9 @@ struct DeviceData {
 #[tauri::command]
 fn get_active_devices() -> Vec<DeviceData> {
     let devices = multicast::get_active_devices();
-    println!("[TAURI] get_active_devices called, found {} devices", devices.len());
     devices
         .iter()
         .map(|dev| {
-            println!("[TAURI] Device: {} - {} msg, {} sec ago", dev.uuid, dev.message_count, dev.last_seen.elapsed().as_secs());
             DeviceData {
                 uuid: dev.uuid.clone(),
                 last_message: dev.last_message.clone(),
