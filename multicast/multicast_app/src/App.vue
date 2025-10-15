@@ -17,11 +17,19 @@ interface StartConfig {
   interface: string | null;
 }
 
+interface DeviceData {
+  uuid: string;
+  last_message: string;
+  message_count: number;
+  seconds_since_seen: number;
+}
+
 const isRunning = ref(false);
 const instanceId = ref<string | null>(null);
 const messages = ref<MessageEvent[]>([]);
 const statusLog = ref<string[]>([]);
 const sentCount = ref(0);
+const activeDevices = ref<DeviceData[]>([]);
 
 const ipAddress = ref('239.255.255.250');
 const port = ref(8888);
@@ -32,6 +40,17 @@ const useAutoInterface = ref(true);
 const protocolVersion = ref<'IPv4' | 'IPv6'>('IPv4');
 
 let unlisteners: UnlistenFn[] = [];
+let deviceUpdateInterval: number | null = null;
+
+const updateDeviceList = async () => {
+  try {
+    const devices = await invoke<DeviceData[]>('get_active_devices');
+    console.log('Active devices updated:', devices.length, devices);
+    activeDevices.value = devices;
+  } catch (error) {
+    console.error('Failed to get active devices:', error);
+  }
+};
 
 onMounted(async () => {
   const unlisten1 = await listen<MessageEvent>('multicast-message', (event) => {
@@ -39,6 +58,7 @@ onMounted(async () => {
     if (messages.value.length > 100) {
       messages.value = messages.value.slice(0, 100);
     }
+    updateDeviceList();
   });
 
   const unlisten2 = await listen<string>('multicast-status', (event) => {
@@ -62,10 +82,17 @@ onMounted(async () => {
 
   isRunning.value = await invoke<boolean>('get_status');
   instanceId.value = await invoke<string | null>('get_instance_id');
+  
+  await updateDeviceList();
+  
+  deviceUpdateInterval = window.setInterval(updateDeviceList, 2000);
 });
 
 onUnmounted(() => {
   unlisteners.forEach(fn => fn());
+  if (deviceUpdateInterval !== null) {
+    clearInterval(deviceUpdateInterval);
+  }
 });
 
 const detectProtocol = () => {
@@ -100,6 +127,8 @@ const startMulticast = async () => {
     instanceId.value = await invoke<string>('start_multicast', { config });
     isRunning.value = true;
     sentCount.value = 0;
+
+    await updateDeviceList();
     
     const timestamp = new Date().toLocaleTimeString();
     statusLog.value.unshift(`[${timestamp}] Started with ID: ${instanceId.value}`);
@@ -114,6 +143,7 @@ const stopMulticast = async () => {
     await invoke('stop_multicast');
     isRunning.value = false;
     instanceId.value = null;
+    activeDevices.value = [];
     
     const timestamp = new Date().toLocaleTimeString();
     statusLog.value.unshift(`[${timestamp}] Stopped`);
@@ -255,6 +285,44 @@ const clearStatus = () => {
         </div>
       </div>
 
+      <!-- Active Devices Panel -->
+      <div class="panel devices-panel">
+        <div class="panel-header">
+          <h2>Active Devices ({{ activeDevices.length }})</h2>
+        </div>
+        
+        <div class="devices-list">
+          <div 
+            v-for="(device, index) in activeDevices" 
+            :key="device.uuid"
+            class="device-item"
+            :class="{
+              'device-fresh': device.seconds_since_seen < 2,
+              'device-stale': device.seconds_since_seen >= 5
+            }"
+          >
+            <div class="device-header">
+              <span class="device-number">Device #{{ index + 1 }}</span>
+              <span class="device-time" :class="{
+                'time-fresh': device.seconds_since_seen < 2,
+                'time-warning': device.seconds_since_seen >= 5 && device.seconds_since_seen < 10,
+                'time-stale': device.seconds_since_seen >= 10
+              }">
+                {{ device.seconds_since_seen < 1 ? '< 1s' : device.seconds_since_seen + 's' }} ago
+              </span>
+            </div>
+            <div class="device-body">
+              <div class="device-message">{{ device.last_message }}</div>
+              <div class="device-count">Messages: {{ device.message_count }}</div>
+            </div>
+          </div>
+          
+          <div v-if="activeDevices.length === 0" class="empty-state">
+            No active devices
+          </div>
+        </div>
+      </div>
+
       <!-- Messages Panel -->
       <div class="panel messages-panel">
         <div class="panel-header">
@@ -361,11 +429,11 @@ h1 {
 }
 
 .container {
-  max-width: 1400px;
+  max-width: 1600px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 350px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: 350px 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
   gap: 20px;
   height: calc(100vh - 140px);
 }
@@ -382,15 +450,21 @@ h1 {
 
 .config-panel {
   grid-row: 1 / -1;
+  grid-column: 1;
+}
+
+.devices-panel {
+  grid-column: 2;
+  grid-row: 1 / -1;
 }
 
 .messages-panel {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
 }
 
 .status-panel {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 2;
 }
 
@@ -564,21 +638,111 @@ button {
 }
 
 .messages-list,
-.status-list {
+.status-list,
+.devices-list {
   flex: 1;
   overflow-y: auto;
   padding-right: 8px;
 }
 
 .messages-list::-webkit-scrollbar,
-.status-list::-webkit-scrollbar {
+.status-list::-webkit-scrollbar,
+.devices-list::-webkit-scrollbar {
   width: 6px;
 }
 
 .messages-list::-webkit-scrollbar-thumb,
-.status-list::-webkit-scrollbar-thumb {
+.status-list::-webkit-scrollbar-thumb,
+.devices-list::-webkit-scrollbar-thumb {
   background: #d1d5db;
   border-radius: 3px;
+}
+
+.device-item {
+  padding: 12px;
+  margin-bottom: 12px;
+  border-left: 4px solid #10b981;
+  background: #f0fdf4;
+  border-radius: 8px;
+  transition: all 0.3s;
+}
+
+.device-item:hover {
+  transform: translateX(4px);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
+}
+
+.device-item.device-fresh {
+  border-left-color: #10b981;
+  background: #ecfdf5;
+}
+
+.device-item.device-stale {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.device-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.device-number {
+  font-size: 0.9rem;
+  color: #059669;
+  font-weight: 700;
+  background: #ecfdf5;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+
+.device-time {
+  font-size: 0.75rem;
+  color: #fff;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+  transition: all 0.3s;
+}
+
+.device-time.time-fresh {
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+.device-time.time-warning {
+  background: #f59e0b;
+}
+
+.device-time.time-stale {
+  background: #ef4444;
+}
+
+.device-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.device-message {
+  color: #1f2937;
+  font-size: 0.95rem;
+  font-weight: 500;
+  padding: 4px 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.device-count {
+  font-size: 0.75rem;
+  color: #059669;
+  font-weight: 600;
+  background: #f0fdf4;
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-top: 4px;
 }
 
 .message-item {

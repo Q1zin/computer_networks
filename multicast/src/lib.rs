@@ -3,8 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::mem::MaybeUninit;
+use std::collections::HashMap;
 use uuid_rs::v4;
 use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -13,6 +14,36 @@ use if_addrs::get_if_addrs;
 
 lazy_static! {
     pub static ref MESSAGE_TEXT: Mutex<String> = Mutex::new(String::from("Hello from client"));
+    pub static ref ACTIVE_DEVICES: Mutex<HashMap<String, DeviceInfo>> = Mutex::new(HashMap::new());
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub uuid: String,
+    pub last_seen: Instant,
+    pub last_message: String,
+    pub message_count: u32,
+}
+
+impl DeviceInfo {
+    pub fn new(uuid: String, message: String) -> Self {
+        Self {
+            uuid,
+            last_seen: Instant::now(),
+            last_message: message,
+            message_count: 1,
+        }
+    }
+
+    pub fn update(&mut self, message: String) {
+        self.last_seen = Instant::now();
+        self.last_message = message;
+        self.message_count += 1;
+    }
+
+    pub fn is_alive(&self, timeout: Duration) -> bool {
+        self.last_seen.elapsed() < timeout
+    }
 }
 
 pub const MSG_TYPE_HEARTBEAT: u8 = 0;
@@ -67,6 +98,55 @@ impl MulticastConfig {
 
 pub fn generate_instance_id() -> String {
     v4!().to_string()
+}
+
+pub fn update_device(uuid: String, message: String) {
+    let mut devices = ACTIVE_DEVICES.lock().unwrap();
+    
+    if let Some(device) = devices.get_mut(&uuid) {
+        device.update(message);
+        info!("[DEVICES] Updated device: {} (total: {})", uuid, devices.len());
+    } else {
+        info!("[DEVICES] New device connected: {} (total will be: {})", uuid, devices.len() + 1);
+        devices.insert(uuid.clone(), DeviceInfo::new(uuid, message));
+    }
+}
+
+pub fn remove_device(uuid: &str) {
+    let mut devices = ACTIVE_DEVICES.lock().unwrap();
+    if devices.remove(uuid).is_some() {
+        info!("[DEVICES] Device disconnected: {}", uuid);
+    }
+}
+
+pub fn cleanup_inactive_devices(timeout: Duration) -> Vec<String> {
+    let mut devices = ACTIVE_DEVICES.lock().unwrap();
+    let mut removed = Vec::new();
+    
+    devices.retain(|uuid, device| {
+        if !device.is_alive(timeout) {
+            info!("[DEVICES] Device timeout: {}", uuid);
+            removed.push(uuid.clone());
+            false
+        } else {
+            true
+        }
+    });
+    
+    removed
+}
+
+pub fn get_active_devices() -> Vec<DeviceInfo> {
+    let devices = ACTIVE_DEVICES.lock().unwrap();
+    let result: Vec<DeviceInfo> = devices.values().cloned().collect();
+    info!("[LIB] get_active_devices returning {} devices", result.len());
+    result
+}
+
+pub fn get_active_device_count() -> usize {
+    let count = ACTIVE_DEVICES.lock().unwrap().len();
+    info!("[LIB] get_active_device_count: {}", count);
+    count
 }
 
 pub fn get_ipv6_interface_index(interface_name: Option<&str>) -> u32 {
@@ -193,7 +273,7 @@ impl Message {
                 format!("Data too short for message text: expected {}, got {}", text_end, data.len())
             ));
         }
-        
+
         let text = String::from_utf8_lossy(&data[39..text_end]).to_string();
         
         Ok(Message {
@@ -278,6 +358,17 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
     
     info!("[SERVER] Successfully joined multicast group, waiting for messages...");
     
+    let cleanup_flag = Arc::clone(&stop_flag);
+    thread::spawn(move || {
+        while !cleanup_flag.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(2));
+            let removed = cleanup_inactive_devices(Duration::from_secs(14));
+            if !removed.is_empty() {
+                info!("[CLEANUP] Removed {} inactive device(s)", removed.len());
+            }
+        }
+    });
+    
     let mut buf = [MaybeUninit::<u8>::uninit(); 1024];
     
     while !stop_flag.load(Ordering::Relaxed) {
@@ -295,10 +386,18 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
                         }
                         
                         let msg_type_str = match msg.msg_type {
-                            0 => "HEARTBEAT",
-                            1 => "DISCONNECT",
+                            MSG_TYPE_HEARTBEAT => {
+                                update_device(msg.uuid.clone(), msg.text.clone());
+                                "HEARTBEAT"
+                            },
+                            MSG_TYPE_DISCONNECT => {
+                                remove_device(&msg.uuid);
+                                "DISCONNECT"
+                            },
                             _ => "UNKNOWN",
                         };
+
+                        let device_count = get_active_device_count();
                         
                         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         info!("[SERVER] Received message from {:?}", remote_socket);
@@ -306,6 +405,7 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
                         info!("Length: {} bytes", msg.length);
                         info!("UUID: {}", msg.uuid);
                         info!("Text: {}", msg.text);
+                        info!("Active devices: {}", device_count);
                         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                     }
                     Err(e) => {
@@ -322,6 +422,7 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
         }
     }
 
+    ACTIVE_DEVICES.lock().unwrap().clear();
     info!("[SERVER] Shutting down");
 }
 

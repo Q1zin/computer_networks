@@ -73,6 +73,17 @@ fn start_multicast(
 
         let _ = app_server.emit("multicast-status", "Server started");
         
+        let cleanup_flag = Arc::clone(&server_flag);
+        thread::spawn(move || {
+            while cleanup_flag.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_secs(2));
+                let removed = multicast::cleanup_inactive_devices(std::time::Duration::from_secs(14));
+                if !removed.is_empty() {
+                    println!("[CLEANUP] Removed {} inactive device(s)", removed.len());
+                }
+            }
+        });
+        
         let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 1024];
         
         while server_flag.load(Ordering::Relaxed) {
@@ -85,8 +96,14 @@ fn start_multicast(
                     if let Ok(msg) = Message::deserialize(data) {
                         if msg.uuid != server_id {
                             let msg_type_str = match msg.msg_type {
-                                0 => "HEARTBEAT",
-                                1 => "DISCONNECT",
+                                multicast::MSG_TYPE_HEARTBEAT => {
+                                    multicast::update_device(msg.uuid.clone(), msg.text.clone());
+                                    "HEARTBEAT"
+                                },
+                                multicast::MSG_TYPE_DISCONNECT => {
+                                    multicast::remove_device(&msg.uuid);
+                                    "DISCONNECT"
+                                },
                                 _ => "UNKNOWN",
                             };
                             
@@ -108,7 +125,8 @@ fn start_multicast(
                 Err(_) => continue,
             }
         }
-        
+
+        multicast::ACTIVE_DEVICES.lock().unwrap().clear();
         let _ = app_server.emit("multicast-status", "Server stopped");
     });
 
@@ -205,6 +223,32 @@ fn get_instance_id(state: State<AppState>) -> Option<String> {
     state.instance_id.lock().unwrap().clone()
 }
 
+#[derive(Clone, Serialize)]
+struct DeviceData {
+    uuid: String,
+    last_message: String,
+    message_count: u32,
+    seconds_since_seen: u64,
+}
+
+#[tauri::command]
+fn get_active_devices() -> Vec<DeviceData> {
+    let devices = multicast::get_active_devices();
+    println!("[TAURI] get_active_devices called, found {} devices", devices.len());
+    devices
+        .iter()
+        .map(|dev| {
+            println!("[TAURI] Device: {} - {} msg, {} sec ago", dev.uuid, dev.message_count, dev.last_seen.elapsed().as_secs());
+            DeviceData {
+                uuid: dev.uuid.clone(),
+                last_message: dev.last_message.clone(),
+                message_count: dev.message_count,
+                seconds_since_seen: dev.last_seen.elapsed().as_secs(),
+            }
+        })
+        .collect()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -220,7 +264,8 @@ pub fn run() {
             stop_multicast,
             update_message,
             get_status,
-            get_instance_id
+            get_instance_id,
+            get_active_devices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
