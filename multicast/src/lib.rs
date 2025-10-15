@@ -280,17 +280,22 @@ impl Message {
         
         buffer.push(self.msg_type);
         
-        if self.text.len() > MAX_MESSAGE_SIZE {
+        let text_bytes = self.text.as_bytes();
+        let uuid_bytes = self.uuid.as_bytes();
+        
+        let total_length = uuid_bytes.len() + text_bytes.len();
+        
+        if total_length > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Message too long: {} bytes (max {})", self.text.len(), MAX_MESSAGE_SIZE)
+                format!("Message too long: {} bytes (max {})", total_length, MAX_MESSAGE_SIZE)
             ));
         }
         
-        let text_bytes = self.text.as_bytes();
-        let length = text_bytes.len() as u16;
-        buffer.extend_from_slice(&length.to_be_bytes());
-        buffer.extend_from_slice(self.uuid.as_bytes());
+        buffer.extend_from_slice(&(total_length as u16).to_be_bytes());
+        
+        buffer.extend_from_slice(uuid_bytes);
+        
         buffer.extend_from_slice(text_bytes);
         
         Ok(buffer)
@@ -306,30 +311,34 @@ impl Message {
         
         let msg_type = data[0];
         
-        let length = u16::from_be_bytes([data[1], data[2]]);
+        let length = u16::from_be_bytes([data[1], data[2]]) as usize;
         
-        if data.len() < 3 + 36 {
+        if data.len() < 3 + length {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Data too short for UUID"
+                format!("Data too short: expected {} bytes, got {}", 3 + length, data.len())
             ));
         }
         
-        let uuid = String::from_utf8_lossy(&data[3..39]).to_string();
+        let uuid;
+        let text;
         
-        let text_end = 39 + length as usize;
-        if data.len() < text_end {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Data too short for message text: expected {}, got {}", text_end, data.len())
-            ));
+        if length >= 36 {
+            uuid = String::from_utf8_lossy(&data[3..39]).to_string();
+            
+            if length > 36 {
+                text = String::from_utf8_lossy(&data[39..3 + length]).to_string();
+            } else {
+                text = String::new();
+            }
+        } else {
+            uuid = String::new();
+            text = String::from_utf8_lossy(&data[3..3 + length]).to_string();
         }
 
-        let text = String::from_utf8_lossy(&data[39..text_end]).to_string();
-        
         Ok(Message {
             msg_type,
-            length,
+            length: length as u16,
             uuid,
             text,
         })
@@ -420,10 +429,10 @@ pub fn create_sender(addr: &SocketAddr, interface_name: Option<&str>) -> io::Res
 pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: MulticastConfig) {
     let mcast_addr = SocketAddr::new(config.ip, config.port);
     let protocol = if config.is_ipv4() { "IPv4" } else { "IPv6" };
-    
+
     info!("[SERVER] Starting multicast listener on {}:{} ({})", config.ip, config.port, protocol);
     info!("[SERVER] Instance ID: {}", instance_id);
-    
+
     let listener = match join_multicast(mcast_addr, config.interface_name.as_deref()) {
         Ok(sock) => sock,
         Err(e) => {
@@ -474,7 +483,7 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
                         };
 
                         let device_count = get_active_device_count();
-                        
+
                         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         info!("[SERVER] Received message from {:?}", remote_socket);
                         info!("Type: {} ({})", msg_type_str, msg.msg_type);
