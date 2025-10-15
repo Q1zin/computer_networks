@@ -9,6 +9,7 @@ use uuid_rs::v4;
 use lazy_static::lazy_static;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use log::{info, error};
+use if_addrs::get_if_addrs;
 
 lazy_static! {
     pub static ref MESSAGE_TEXT: Mutex<String> = Mutex::new(String::from("Hello from client"));
@@ -54,6 +55,56 @@ impl MulticastConfig {
 
 pub fn generate_instance_id() -> String {
     v4!().to_string()
+}
+
+pub fn find_ipv6_multicast_interface() -> u32 {
+    match get_if_addrs() {
+        Ok(interfaces) => {
+            for iface in interfaces.iter() {
+                if let IpAddr::V6(ipv6_addr) = iface.addr.ip() {
+                    if ipv6_addr.is_loopback() {
+                        continue;
+                    }
+                    
+                    if let Ok(index) = get_interface_index(&iface.name) {
+                        return index;
+                    }
+                }
+            }
+            
+            for iface in interfaces.iter() {
+                if let IpAddr::V6(ipv6_addr) = iface.addr.ip() {
+                    if !ipv6_addr.is_loopback() {
+                        if let Ok(index) = get_interface_index(&iface.name) {
+                            return index;
+                        }
+                    }
+                }
+            }
+            
+            error!("[IPv6] No suitable IPv6 interface found, using default (0)");
+            0
+        }
+        Err(e) => {
+            error!("[IPv6] Failed to get network interfaces: {}", e);
+            0
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn get_interface_index(name: &str) -> io::Result<u32> {
+    use std::ffi::CString;
+    let c_name = CString::new(name)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    
+    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    
+    if index == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(index)
+    }
 }
 
 #[derive(Debug)]
@@ -168,7 +219,10 @@ pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
             0,
         )))?;
     } else {
-        socket.set_multicast_if_v6(14)?;
+        let interface_index = find_ipv6_multicast_interface();
+        info!("[IPv6] Using interface index {} for multicast", interface_index);
+
+        socket.set_multicast_if_v6(interface_index)?;
         socket.set_multicast_loop_v6(true)?;
         socket.bind(&SockAddr::from(SocketAddr::new(
             Ipv6Addr::UNSPECIFIED.into(),

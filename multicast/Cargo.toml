@@ -10,3 +10,5 @@ uuid-rs = { version = "0.6.4", features = ["rnd"] }
 log = "0.4.28"
 simple_logger = "5.0.0"
 clap = { version = "4.5", features = ["derive"] }
+if-addrs = "0.13"
+libc = "0.2"
