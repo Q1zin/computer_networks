@@ -3,7 +3,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::net::Ipv4Addr;
 use log::{LevelFilter, info};
 use clap::Parser;
 
@@ -19,6 +18,9 @@ struct Args {
 
     #[arg(short, long, default_value = "Hello from client")]
     message: String,
+
+    #[arg(short, long, default_value_t = 30)]
+    duration: u64,
 }
 
 fn main() {
@@ -29,15 +31,11 @@ fn main() {
 
     let args = Args::parse();
 
-    let ip: Ipv4Addr = args.ip.parse().expect("Invalid IP address");
-    
-    let config = MulticastConfig {
-        ip,
-        port: args.port,
-        message: args.message,
-    };
+    let config = MulticastConfig::from_ip_string(&args.ip, args.port, args.message)
+        .expect("Invalid IP address");
 
-    info!("Configuration: IP={}, Port={}, Message='{}'", config.ip, config.port, config.message);
+    let protocol = if config.is_ipv4() { "IPv4" } else { "IPv6" };
+    info!("Configuration: IP={} ({}), Port={}, Message='{}'", config.ip, protocol, config.port, config.message);
 
     let instance_id = generate_instance_id();
 
@@ -58,7 +56,7 @@ fn main() {
         client_thread(client_flag, client_id, client_config);
     });
 
-    thread::sleep(Duration::from_secs(30));
+    thread::sleep(Duration::from_secs(args.duration));
 
     info!("\n=== Stopping ===\n");
     disconnect(Arc::clone(&client_running));

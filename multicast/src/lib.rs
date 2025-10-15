@@ -20,7 +20,7 @@ pub const MAX_MESSAGE_SIZE: usize = 500;
 
 #[derive(Clone, Debug)]
 pub struct MulticastConfig {
-    pub ip: Ipv4Addr,
+    pub ip: IpAddr,
     pub port: u16,
     pub message: String,
 }
@@ -28,10 +28,27 @@ pub struct MulticastConfig {
 impl Default for MulticastConfig {
     fn default() -> Self {
         Self {
-            ip: Ipv4Addr::new(239, 255, 255, 250),
+            ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
             port: 8888,
             message: String::from("Hello from client"),
         }
+    }
+}
+
+impl MulticastConfig {
+    pub fn from_ip_string(ip_str: &str, port: u16, message: String) -> io::Result<Self> {
+        let ip: IpAddr = ip_str.parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP address: {}", e)))?;
+        
+        Ok(Self { ip, port, message })
+    }
+    
+    pub fn is_ipv4(&self) -> bool {
+        self.ip.is_ipv4()
+    }
+    
+    pub fn is_ipv6(&self) -> bool {
+        self.ip.is_ipv6()
     }
 }
 
@@ -145,15 +162,16 @@ pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
     let socket = new_socket(addr)?;
     
     if addr.is_ipv4() {
-        socket.set_multicast_if_v4(&Ipv4Addr::new(0, 0, 0, 0))?;
+        socket.set_multicast_if_v4(&Ipv4Addr::UNSPECIFIED)?;
         socket.bind(&SockAddr::from(SocketAddr::new(
-            Ipv4Addr::new(0, 0, 0, 0).into(),
+            Ipv4Addr::UNSPECIFIED.into(),
             0,
         )))?;
     } else {
-        socket.set_multicast_if_v6(0)?;
+        socket.set_multicast_if_v6(14)?;
+        socket.set_multicast_loop_v6(true)?;
         socket.bind(&SockAddr::from(SocketAddr::new(
-            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0).into(),
+            Ipv6Addr::UNSPECIFIED.into(),
             0,
         )))?;
     }
@@ -162,9 +180,10 @@ pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
 }
 
 pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: MulticastConfig) {
-    let mcast_addr = SocketAddr::new(config.ip.into(), config.port);
+    let mcast_addr = SocketAddr::new(config.ip, config.port);
+    let protocol = if config.is_ipv4() { "IPv4" } else { "IPv6" };
     
-    info!("[SERVER] Starting multicast listener on {}:{}", config.ip, config.port);
+    info!("[SERVER] Starting multicast listener on {}:{} ({})", config.ip, config.port, protocol);
     info!("[SERVER] Instance ID: {}", instance_id);
     
     let listener = match join_multicast(mcast_addr) {
@@ -230,11 +249,12 @@ pub fn stop_server(server_stop_flag: Arc<AtomicBool>) {
 }
 
 pub fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: MulticastConfig) {
-    let mcast_addr = SocketAddr::new(config.ip.into(), config.port);
+    let mcast_addr = SocketAddr::new(config.ip, config.port);
+    let protocol = if config.is_ipv4() { "IPv4" } else { "IPv6" };
     
     thread::sleep(Duration::from_millis(500));
 
-    info!("[CLIENT] Starting multicast sender");
+    info!("[CLIENT] Starting multicast sender ({})", protocol);
 
     let sender = match create_sender(&mcast_addr) {
         Ok(sock) => sock,
