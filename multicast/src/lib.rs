@@ -299,7 +299,7 @@ pub fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
     Ok(socket)
 }
 
-pub fn join_multicast(addr: SocketAddr) -> io::Result<Socket> {
+pub fn join_multicast(addr: SocketAddr, interface_name: Option<&str>) -> io::Result<Socket> {
     let ip_addr = addr.ip();
     let socket = new_socket(&addr)?;
 
@@ -308,7 +308,13 @@ pub fn join_multicast(addr: SocketAddr) -> io::Result<Socket> {
             socket.join_multicast_v4(mdns_v4, &Ipv4Addr::new(0, 0, 0, 0))?;
         }
         IpAddr::V6(ref mdns_v6) => {
-            socket.join_multicast_v6(mdns_v6, 0)?;
+            let interface_index = get_ipv6_interface_index(interface_name);
+            
+            if interface_index != 0 {
+                info!("[IPv6] Server using interface index {} for multicast join", interface_index);
+            }
+            
+            socket.join_multicast_v6(mdns_v6, interface_index)?;
             socket.set_only_v6(true)?;
         }
     };
@@ -327,10 +333,23 @@ pub fn create_sender(addr: &SocketAddr, interface_name: Option<&str>) -> io::Res
             0,
         )))?;
     } else {
-        let interface_index = get_ipv6_interface_index(interface_name);
-        info!("[IPv6] Using interface index {} for multicast", interface_index);
-
-        socket.set_multicast_if_v6(interface_index)?;
+        let is_link_local = if let IpAddr::V6(ref ipv6) = addr.ip() {
+            ipv6.segments()[0] & 0xff0f == 0xff02
+        } else {
+            false
+        };
+        
+        let interface_index = if is_link_local || interface_name.is_some() {
+            get_ipv6_interface_index(interface_name)
+        } else {
+            0
+        };
+        
+        if interface_index != 0 {
+            info!("[IPv6] Using interface index {} for multicast", interface_index);
+            socket.set_multicast_if_v6(interface_index)?;
+        }
+        
         socket.set_multicast_loop_v6(true)?;
         socket.bind(&SockAddr::from(SocketAddr::new(
             Ipv6Addr::UNSPECIFIED.into(),
@@ -348,7 +367,7 @@ pub fn server_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
     info!("[SERVER] Starting multicast listener on {}:{} ({})", config.ip, config.port, protocol);
     info!("[SERVER] Instance ID: {}", instance_id);
     
-    let listener = match join_multicast(mcast_addr) {
+    let listener = match join_multicast(mcast_addr, config.interface_name.as_deref()) {
         Ok(sock) => sock,
         Err(e) => {
             error!("[SERVER] Failed to join multicast group: {}", e);

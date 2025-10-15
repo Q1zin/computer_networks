@@ -63,7 +63,7 @@ fn start_multicast(
     thread::spawn(move || {
         let mcast_addr = std::net::SocketAddr::new(server_config.ip, server_config.port);
         
-        let listener = match join_multicast(mcast_addr) {
+        let listener = match join_multicast(mcast_addr, server_config.interface_name.as_deref()) {
             Ok(sock) => sock,
             Err(e) => {
                 let _ = app_server.emit("multicast-error", format!("Failed to join: {}", e));
