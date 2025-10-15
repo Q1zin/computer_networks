@@ -21,6 +21,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 30)]
     duration: u64,
+
+    #[arg(short = 'I', long)]
+    interface: Option<String>,
 }
 
 fn main() {
@@ -31,11 +34,12 @@ fn main() {
 
     let args = Args::parse();
 
-    let config = MulticastConfig::from_ip_string(&args.ip, args.port, args.message)
-        .expect("Invalid IP address");
-
-    let protocol = if config.is_ipv4() { "IPv4" } else { "IPv6" };
-    info!("Configuration: IP={} ({}), Port={}, Message='{}'", config.ip, protocol, config.port, config.message);
+    let config = MulticastConfig::from_ip_string_with_interface(
+        &args.ip, 
+        args.port, 
+        args.message,
+        args.interface.clone()
+    ).expect("Invalid IP address");
 
     let instance_id = generate_instance_id();
 

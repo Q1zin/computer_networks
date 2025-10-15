@@ -24,6 +24,7 @@ pub struct MulticastConfig {
     pub ip: IpAddr,
     pub port: u16,
     pub message: String,
+    pub interface_name: Option<String>,
 }
 
 impl Default for MulticastConfig {
@@ -32,16 +33,27 @@ impl Default for MulticastConfig {
             ip: IpAddr::V4(Ipv4Addr::new(239, 255, 255, 250)),
             port: 8888,
             message: String::from("Hello from client"),
+            interface_name: None,
         }
     }
 }
 
 impl MulticastConfig {
-    pub fn from_ip_string(ip_str: &str, port: u16, message: String) -> io::Result<Self> {
+    pub fn from_ip_string_with_interface(
+        ip_str: &str, 
+        port: u16, 
+        message: String,
+        interface_name: Option<String>
+    ) -> io::Result<Self> {
         let ip: IpAddr = ip_str.parse()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP address: {}", e)))?;
         
-        Ok(Self { ip, port, message })
+        Ok(Self { 
+            ip, 
+            port, 
+            message,
+            interface_name,
+        })
     }
     
     pub fn is_ipv4(&self) -> bool {
@@ -55,6 +67,22 @@ impl MulticastConfig {
 
 pub fn generate_instance_id() -> String {
     v4!().to_string()
+}
+
+pub fn get_ipv6_interface_index(interface_name: Option<&str>) -> u32 {
+    if let Some(name) = interface_name {
+        match get_interface_index(name) {
+            Ok(index) => {
+                info!("[IPv6] Using specified interface: {} (index: {})", name, index);
+                return index;
+            }
+            Err(e) => {
+                error!("[IPv6] Failed to get index for interface '{}': {}. Falling back to auto-detection.", name, e);
+            }
+        }
+    }
+    
+    find_ipv6_multicast_interface()
 }
 
 pub fn find_ipv6_multicast_interface() -> u32 {
@@ -209,7 +237,7 @@ pub fn join_multicast(addr: SocketAddr) -> io::Result<Socket> {
     Ok(socket)
 }
 
-pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
+pub fn create_sender(addr: &SocketAddr, interface_name: Option<&str>) -> io::Result<Socket> {
     let socket = new_socket(addr)?;
     
     if addr.is_ipv4() {
@@ -219,7 +247,7 @@ pub fn create_sender(addr: &SocketAddr) -> io::Result<Socket> {
             0,
         )))?;
     } else {
-        let interface_index = find_ipv6_multicast_interface();
+        let interface_index = get_ipv6_interface_index(interface_name);
         info!("[IPv6] Using interface index {} for multicast", interface_index);
 
         socket.set_multicast_if_v6(interface_index)?;
@@ -309,8 +337,10 @@ pub fn client_thread(stop_flag: Arc<AtomicBool>, instance_id: String, config: Mu
     thread::sleep(Duration::from_millis(500));
 
     info!("[CLIENT] Starting multicast sender ({})", protocol);
+    
+    let interface_ref = config.interface_name.as_deref();
 
-    let sender = match create_sender(&mcast_addr) {
+    let sender = match create_sender(&mcast_addr, interface_ref) {
         Ok(sock) => sock,
         Err(e) => {
             error!("[CLIENT] Failed to create sender socket: {}", e);
