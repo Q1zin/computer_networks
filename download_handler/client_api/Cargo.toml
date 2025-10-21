@@ -1,0 +1,8 @@
+[package]
+name = "client_api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+byteorder = "1.4.3"
+serde = { version = "1", features = ["derive"] }

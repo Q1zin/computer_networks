@@ -1,22 +1,19 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 
 const serverIp = ref("127.0.0.1");
-const serverPort = ref("4000");
+const serverPort = ref(4000);
 
-const downloadFiles = ref([
-  { name: "test.txt", size: "1.2 MB" },
-]);
+type AvailableFile = { name: string; size_mb: number };
+
+const downloadFiles = ref<AvailableFile[]>([]);
 
 const uploadQueue = ref([
   { name: "test.txt", progress: 65, speed: "5.4 MB/s" },
 ]);
 
-const logs = ref([
-  "[12:02:18] Connected to 127.0.0.1:4000",
-  "[12:03:01] Download queued: report_q3.pdf",
-  "[12:04:22] Upload completed: metrics.csv (3.2 MB) in 1.5 s",
-]);
+const logs = ref<string[]>([]);
 
 function mockDownload(file: { name: string }) {
   console.log(`Download requested: ${file.name}`);
@@ -25,6 +22,22 @@ function mockDownload(file: { name: string }) {
 function mockUpload() {
   console.log("Upload dialog requested");
 }
+
+function updateAvailableFiles() {
+  invoke<AvailableFile[]>("get_available_files", { serverIp: serverIp.value, serverPort: serverPort.value })
+    .then((response) => {
+      logs.value.push(`[${new Date().toLocaleTimeString()}] (get_available_files) Available files fetched: ${JSON.stringify(response)}`);
+      downloadFiles.value = response;
+    })
+    .catch((error) => {
+      logs.value.push(`[${new Date().toLocaleTimeString()}] Error fetching available files: ${error}`);
+      downloadFiles.value = [];
+    });
+}
+
+onMounted(() => {
+  updateAvailableFiles()
+});
 </script>
 
 <template>
@@ -50,7 +63,7 @@ function mockUpload() {
         <li v-for="file in downloadFiles" :key="file.name" class="file-row">
           <div class="file-info">
             <span class="file-name">{{ file.name }}</span>
-            <span class="file-size">{{ file.size }}</span>
+            <span class="file-size">{{ file.size_mb.toFixed(2) }} MB</span>
           </div>
           <button class="ghost-button" @click="mockDownload(file)">Download</button>
         </li>

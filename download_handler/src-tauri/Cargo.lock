@@ -457,6 +457,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "client_api"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "serde",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -754,6 +762,7 @@ dependencies = [
 name = "download-handler"
 version = "0.1.0"
 dependencies = [
+ "client_api",
  "serde",
  "serde_json",
  "tauri",
