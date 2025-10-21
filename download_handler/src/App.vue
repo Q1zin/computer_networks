@@ -16,7 +16,13 @@ const uploadQueue = ref([
 const logs = ref<string[]>([]);
 
 function mockDownload(file: { name: string }) {
-  console.log(`Download requested: ${file.name}`);
+  invoke<string>("download_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, fileName: file.name })
+    .then((response) => {
+      logs.value.push(`[${new Date().toLocaleTimeString()}] (download_file_front) Download initiated: ${JSON.stringify(response)}`);
+    })
+    .catch((error) => {
+      logs.value.push(`[${new Date().toLocaleTimeString()}] Error downloading: ${error}`);
+    });
 }
 
 function mockUpload() {
@@ -46,11 +52,21 @@ onMounted(() => {
       <div class="connection-fields">
         <label class="field">
           <span>IP address</span>
-          <input v-model="serverIp" type="text" placeholder="192.168.0.2" />
+          <input
+            v-model="serverIp"
+            type="text"
+            placeholder="192.168.0.2"
+            @blur="updateAvailableFiles"
+          />
         </label>
         <label class="field">
           <span>Port</span>
-          <input v-model="serverPort" type="text" placeholder="4000" />
+          <input
+            v-model="serverPort"
+            type="text"
+            placeholder="4000"
+            @blur="updateAvailableFiles"
+          />
         </label>
       </div>
     </section>
@@ -58,6 +74,9 @@ onMounted(() => {
     <section class="download-panel">
       <div class="panel-header">
         <h2>Download</h2>
+        <button class="ghost-button" type="button" @click="updateAvailableFiles">
+          Refresh
+        </button>
       </div>
       <ul class="file-list">
         <li v-for="file in downloadFiles" :key="file.name" class="file-row">
@@ -134,6 +153,12 @@ section {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .panel-header h2 {
