@@ -1,160 +1,299 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 
-const greetMsg = ref("");
-const name = ref("");
+const serverIp = ref("127.0.0.1");
+const serverPort = ref("4000");
 
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+const downloadFiles = ref([
+  { name: "test.txt", size: "1.2 MB" },
+]);
+
+const uploadQueue = ref([
+  { name: "test.txt", progress: 65, speed: "5.4 MB/s" },
+]);
+
+const logs = ref([
+  "[12:02:18] Connected to 127.0.0.1:4000",
+  "[12:03:01] Download queued: report_q3.pdf",
+  "[12:04:22] Upload completed: metrics.csv (3.2 MB) in 1.5 s",
+]);
+
+function mockDownload(file: { name: string }) {
+  console.log(`Download requested: ${file.name}`);
+}
+
+function mockUpload() {
+  console.log("Upload dialog requested");
 }
 </script>
 
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+  <div class="app-shell">
+    <section class="connection-panel">
+      <div class="connection-fields">
+        <label class="field">
+          <span>IP address</span>
+          <input v-model="serverIp" type="text" placeholder="192.168.0.2" />
+        </label>
+        <label class="field">
+          <span>Port</span>
+          <input v-model="serverPort" type="text" placeholder="4000" />
+        </label>
+      </div>
+    </section>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <section class="download-panel">
+      <div class="panel-header">
+        <h2>Download</h2>
+      </div>
+      <ul class="file-list">
+        <li v-for="file in downloadFiles" :key="file.name" class="file-row">
+          <div class="file-info">
+            <span class="file-name">{{ file.name }}</span>
+            <span class="file-size">{{ file.size }}</span>
+          </div>
+          <button class="ghost-button" @click="mockDownload(file)">Download</button>
+        </li>
+      </ul>
+    </section>
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
-  </main>
+    <section class="upload-panel">
+      <div class="panel-header">
+        <h2>Upload</h2>
+      </div>
+      <button class="primary-button" @click="mockUpload">Upload file</button>
+      <ul class="upload-list">
+        <li v-for="item in uploadQueue" :key="item.name" class="upload-row">
+          <div class="upload-meta">
+            <span class="file-name">{{ item.name }}</span>
+            <span class="file-speed">{{ item.speed }}</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: `${item.progress}%` }"></div>
+          </div>
+          <span class="progress-label">{{ item.progress }}%</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="log-panel">
+      <div class="panel-header">
+        <h2>Activity Log</h2>
+      </div>
+      <div class="log-surface">
+        <pre v-for="(entry, idx) in logs" :key="idx" class="log-entry">{{ entry }}</pre>
+      </div>
+    </section>
+  </div>
 </template>
 
 <style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
-<style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
+* {
+  box-sizing: border-box;
   margin: 0;
-  padding-top: 10vh;
+  padding: 0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+.app-shell {
+  min-height: 100vh;
+  padding: 48px 24px 64px;
+  background: linear-gradient(180deg, #1f1f23 0%, #20202e 100%);
+  color: #e5e7eb;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  gap: 32px;
+}
+
+.header {
+  max-width: 960px;
+  margin: 0 auto;
   text-align: center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
+section {
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+  background-color: rgba(31, 32, 38, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 16px;
+  padding: 24px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
 }
 
-a {
+.panel-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f3f4f6;
+}
+
+.connection-panel .connection-fields {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #d1d5db;
+  font-size: 14px;
+}
+
+.field span {
   font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+  letter-spacing: 0.02em;
 }
 
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
+input {
+  background-color: rgba(15, 15, 19, 0.7);
+  border: 1px solid rgba(107, 114, 128, 0.4);
   border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  padding: 10px 12px;
+  color: #e5e7eb;
+  font-size: 14px;
+  transition: border 0.2s ease;
 }
 
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
+input:focus {
   outline: none;
+  border-color: rgba(148, 163, 184, 0.8);
 }
 
-#greet-input {
-  margin-right: 5px;
+.file-list,
+.upload-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+.file-row,
+.upload-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  background-color: rgba(12, 12, 16, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
 }
 
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-name {
+  font-weight: 500;
+  color: #f3f4f6;
+}
+
+.file-size,
+.file-speed,
+.progress-label {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.ghost-button,
+.primary-button {
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 0.2s ease, border 0.2s ease, color 0.2s ease;
+}
+
+.ghost-button {
+  background-color: transparent;
+  color: #d1d5db;
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.ghost-button:hover {
+  border-color: rgba(209, 213, 219, 0.6);
+  color: #f9fafb;
+}
+
+.primary-button {
+  align-self: flex-start;
+  background-color: rgba(75, 85, 99, 0.75);
+  color: #f9fafb;
+}
+
+.primary-button:hover {
+  background-color: rgba(107, 114, 128, 0.85);
+}
+
+.upload-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.progress-bar {
+  position: relative;
+  height: 8px;
+  flex: 1;
+  background-color: rgba(31, 41, 55, 0.8);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4b5563 0%, #9ca3af 100%);
+  transition: width 0.3s ease;
+}
+
+.log-surface {
+  background-color: rgba(12, 12, 16, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.log-entry {
+  margin: 0;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 32px 16px;
+    gap: 24px;
+  }
+
+  section {
+    padding: 20px;
+  }
+
+  .file-row,
+  .upload-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .progress-bar {
+    width: 100%;
+  }
+}
 </style>
