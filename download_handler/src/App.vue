@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from '@tauri-apps/plugin-dialog';
 
 const serverIp = ref("127.0.0.1");
 const serverPort = ref(4000);
@@ -18,25 +19,38 @@ const logs = ref<string[]>([]);
 function mockDownload(file: { name: string }) {
   invoke<string>("download_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, fileName: file.name })
     .then((response) => {
-      logs.value.push(`[${new Date().toLocaleTimeString()}] (download_file_front) Download initiated: ${JSON.stringify(response)}`);
+      writeLog(`(download_file_front) Download initiated: ${JSON.stringify(response)}`);
     })
     .catch((error) => {
-      logs.value.push(`[${new Date().toLocaleTimeString()}] Error downloading: ${error}`);
+      writeLog(`Error downloading: ${error}`);
     });
 }
 
-function mockUpload() {
-  console.log("Upload dialog requested");
+async function mockUpload() {
+  const file = await open({
+    multiple: false,
+    directory: false,
+  });
+
+  await invoke<string>("upload_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, filePath: file as string })
+    .then((response) => {
+      writeLog(`(upload_file_front) Upload initiated: ${JSON.stringify(response)}`);
+    })
+    .catch((error) => {
+      writeLog(`Error uploading: ${error}`);
+    });
+  
+  updateAvailableFiles()
 }
 
 function updateAvailableFiles() {
   invoke<AvailableFile[]>("get_available_files", { serverIp: serverIp.value, serverPort: serverPort.value })
     .then((response) => {
-      logs.value.push(`[${new Date().toLocaleTimeString()}] (get_available_files) Available files fetched: ${JSON.stringify(response)}`);
+      writeLog(`(get_available_files) Available files fetched: ${JSON.stringify(response)}`);
       downloadFiles.value = response;
     })
     .catch((error) => {
-      logs.value.push(`[${new Date().toLocaleTimeString()}] Error fetching available files: ${error}`);
+      writeLog(`Error fetching available files: ${error}`);
       downloadFiles.value = [];
     });
 }
@@ -44,6 +58,10 @@ function updateAvailableFiles() {
 onMounted(() => {
   updateAvailableFiles()
 });
+
+function writeLog(message: string) {
+  logs.value.push(`[${new Date().toLocaleTimeString()}] ${message}`);
+}
 </script>
 
 <template>
