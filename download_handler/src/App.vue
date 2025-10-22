@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog';
 
 const serverIp = ref("127.0.0.1");
 const serverPort = ref(4000);
 
 type AvailableFile = { name: string; size_mb: number };
+type UploadFile = { name: string; progress: number; instant: number | null; avg: number };
 
 const downloadFiles = ref<AvailableFile[]>([]);
 
-const uploadQueue = ref([
-  { name: "test.txt", progress: 65, speed: "5.4 MB/s" },
-]);
+const uploadQueue = ref<UploadFile[]>([]);
 
 const logs = ref<string[]>([]);
 
@@ -32,8 +32,11 @@ async function mockUpload() {
     directory: false,
   });
 
+  uploadQueue.value.push({ name: (file as string).split('/').pop() || 'unknown', progress: 0, instant: 0, avg: 0 });
+
   await invoke<string>("upload_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, filePath: file as string })
     .then((response) => {
+      uploadQueue.value.find(item => item.name === (file as string).split('/').pop())!.instant = null;
       writeLog(`(upload_file_front) Upload initiated: ${JSON.stringify(response)}`);
     })
     .catch((error) => {
@@ -55,8 +58,29 @@ function updateAvailableFiles() {
     });
 }
 
+type ProgressData = {
+  name: string;
+  progress: number;
+  instant: number;
+  avg: number;
+};
+
+const addListeners = async () => {
+  listen<ProgressData>("upload_progress", ({ payload }) => {
+    console.log("Upload progress:", payload);
+    const file = uploadQueue.value.find(item => item.name === payload.name);
+    if (file) {
+      file.progress = payload.progress;
+      file.instant = payload.instant;
+      file.avg = payload.avg;
+    }
+  });
+}
+
 onMounted(() => {
   updateAvailableFiles()
+
+  addListeners()
 });
 
 function writeLog(message: string) {
@@ -116,12 +140,13 @@ function writeLog(message: string) {
         <li v-for="item in uploadQueue" :key="item.name" class="upload-row">
           <div class="upload-meta">
             <span class="file-name">{{ item.name }}</span>
-            <span class="file-speed">{{ item.speed }}</span>
+            <span v-if="item.instant" class="file-speed">Speed: {{ item.instant.toFixed(2) }} MB/s</span>
+            <span class="file-speed">Avg: {{ item.avg.toFixed(2) }} MB/s</span>
           </div>
           <div class="progress-bar">
             <div class="progress-fill" :style="{ width: `${item.progress}%` }"></div>
           </div>
-          <span class="progress-label">{{ item.progress }}%</span>
+          <span class="progress-label">{{ item.progress.toFixed(0) }}%</span>
         </li>
       </ul>
     </section>

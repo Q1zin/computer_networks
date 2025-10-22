@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
 use serde::Serialize;
 
@@ -32,10 +32,13 @@ pub fn fetch_available_files(server_addr: &str) -> std::io::Result<Vec<RemoteFil
     Ok(files)
 }
 
-pub fn upload_file(path: &Path, server_addr: &str) -> std::io::Result<()> {
+pub fn upload_file<F>(path: &Path, server_addr: &str, mut on_progress: F) -> std::io::Result<()>
+where
+    F: FnMut(f64, f64, f64),
+{
     let mut file = File::open(path)?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
+    let metadata = file.metadata()?;
+    let total_size = metadata.len();
 
     let file_name = path
         .file_name()
@@ -47,25 +50,51 @@ pub fn upload_file(path: &Path, server_addr: &str) -> std::io::Result<()> {
     let mut stream = TcpStream::connect(server_addr)?;
     stream.write_all(&[b'U'])?;
 
-    let transfer_start = Instant::now();
     stream.write_u16::<BigEndian>(file_name.len() as u16)?;
     stream.write_all(&file_name)?;
-    stream.write_u64::<BigEndian>(content.len() as u64)?;
-    stream.write_all(&content)?;
+    stream.write_u64::<BigEndian>(total_size)?;
 
-    let elapsed = transfer_start.elapsed().as_secs_f64();
-    let size_mb = content.len() as f64 / (1024.0 * 1024.0);
-    let speed = if elapsed > 0.0 { size_mb / elapsed } else { 0.0 };
-    println!(
-        "Upload speed: {:.2} MB in {:.3} s ({:.2} MB/s)",
-        size_mb,
-        elapsed,
-        speed
-    );
+    let mut sent_bytes: u64 = 0;
+    let mut buffer = [0u8; 8192];
+    let start_time = Instant::now();
+    let mut last_time = Instant::now();
+    let mut last_sent: u64 = 0;
+
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&buffer[..n])?;
+        sent_bytes += n as u64;
+
+        let now = Instant::now();
+        let elapsed_since_last = now.duration_since(last_time);
+
+        if elapsed_since_last >= Duration::from_millis(200) {
+            let progress = (sent_bytes as f64 / total_size as f64) * 100.0;
+            let total_elapsed = now.duration_since(start_time).as_secs_f64();
+
+            let delta_bytes = sent_bytes - last_sent;
+            let instant_speed = (delta_bytes as f64 / (1024.0 * 1024.0)) / elapsed_since_last.as_secs_f64();
+
+            let avg_speed = (sent_bytes as f64 / (1024.0 * 1024.0)) / total_elapsed;
+
+            on_progress(progress, instant_speed, avg_speed);
+
+            last_sent = sent_bytes;
+            last_time = now;
+        }
+    }
+
+    let total_elapsed = start_time.elapsed().as_secs_f64();
+    let avg_speed = (total_size as f64 / (1024.0 * 1024.0)) / total_elapsed;
+    on_progress(100.0, 0.0, avg_speed);
 
     let mut resp = String::new();
     stream.read_to_string(&mut resp)?;
-    println!("Server response: {}", resp.trim());
+    println!("Server response: {}\n", resp.trim());
+
     Ok(())
 }
 

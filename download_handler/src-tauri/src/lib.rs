@@ -1,5 +1,9 @@
 use client_api::{upload_file, download_file, fetch_available_files, RemoteFileInfo};
 use std::{env, path::Path};
+use tauri::{AppHandle, Emitter};
+use std::sync::{OnceLock};
+
+pub static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 #[tauri::command]
 fn get_available_files(server_ip: &str, server_port: i32) -> Result<Vec<RemoteFileInfo>, String> {
@@ -12,7 +16,7 @@ fn get_available_files(server_ip: &str, server_port: i32) -> Result<Vec<RemoteFi
 }
 
 #[tauri::command]
-fn download_file_front(
+async fn download_file_front(
     server_ip: &str,
     server_port: i32,
     file_name: &str,
@@ -35,15 +39,40 @@ fn download_file_front(
     Ok("Download initiated".to_string())
 }
 
+#[derive(serde::Serialize)]
+struct ProgressData {
+    name: String,
+    progress: f64,
+    instant: f64,
+    avg: f64,
+}
+
 #[tauri::command]
-fn upload_file_front(
+async fn upload_file_front(
     server_ip: &str,
     server_port: i32,
     file_path: &str,
 ) -> Result<String, String> {
     let server_addr = format!("{}:{}", server_ip, server_port);
     let source = Path::new(file_path);
-    let result = upload_file(&source, &server_addr);
+    let result = upload_file(&source, &server_addr, |progress, instant, avg: f64| {
+        let app_handle: &AppHandle = APP_HANDLE.get().expect("AppHandle not initialized");
+        let file_name = source
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+        let response = ProgressData {
+            name: file_name,
+            progress,
+            instant,
+            avg,
+        };
+
+        app_handle.emit("upload_progress", &response).unwrap();
+        println!("Progress: {:6.2}% | Now: {:6.2} MB/s | Avg: {:6.2} MB/s | File: {}", progress, instant, avg, response.name);
+    });
+
     match result {
         Ok(_) => Ok(format!("File '{}' uploaded successfully from {:?}", file_path, source)),
         Err(e) => Err(format!("Failed to upload file '{}': {}", file_path, e)),
@@ -56,6 +85,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let app_handle = app.handle();
+            APP_HANDLE.set(app_handle.clone()).unwrap();
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_available_files,
             download_file_front,
