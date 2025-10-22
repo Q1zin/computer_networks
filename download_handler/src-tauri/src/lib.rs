@@ -6,7 +6,10 @@ use std::sync::{OnceLock};
 pub static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 #[tauri::command]
-fn get_available_files(server_ip: &str, server_port: i32) -> Result<Vec<RemoteFileInfo>, String> {
+async fn get_available_files(
+    server_ip: &str, 
+    server_port: &str
+) -> Result<Vec<RemoteFileInfo>, String> {
     let server_addr = format!("{}:{}", server_ip, server_port);
     let available_files = fetch_available_files(&server_addr);
     match available_files {
@@ -18,7 +21,7 @@ fn get_available_files(server_ip: &str, server_port: i32) -> Result<Vec<RemoteFi
 #[tauri::command]
 async fn download_file_front(
     server_ip: &str,
-    server_port: i32,
+    server_port: &str,
     file_name: &str,
 ) -> Result<String, String> {
     let _ = env::home_dir()
@@ -50,7 +53,7 @@ struct ProgressData {
 #[tauri::command]
 async fn upload_file_front(
     server_ip: &str,
-    server_port: i32,
+    server_port: &str,
     file_path: &str,
 ) -> Result<String, String> {
     let server_addr = format!("{}:{}", server_ip, server_port);

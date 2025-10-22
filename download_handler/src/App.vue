@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog';
 
 const serverIp = ref("127.0.0.1");
-const serverPort = ref(4000);
+const serverPort = ref("4000");
 
 type AvailableFile = { name: string; size_mb: number };
 type UploadFile = { name: string; progress: number; instant: number | null; avg: number };
