@@ -63,6 +63,10 @@ async function mockUpload() {
 
   await invoke<string>("upload_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, filePath: file as string })
     .then((response) => {
+      const target = uploadQueue.value.find(item => item.name === (file as string).split('/').pop());
+      if (target) {
+        target.instant = null;
+      }
       writeLog(`(upload_file_front) Upload initiated: ${JSON.stringify(response)}`);
     })
     .catch((error) => {
@@ -97,7 +101,7 @@ const addListeners = async () => {
     const file = uploadQueue.value.find(item => item.name === payload.name);
     if (file) {
       file.progress = payload.progress;
-      file.instant = payload.instant ? payload.instant : null;
+      file.instant = payload.instant;
       file.avg = payload.avg;
     }
   });
