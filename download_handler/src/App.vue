@@ -59,13 +59,16 @@ async function mockUpload() {
     directory: false,
   });
 
-  uploadQueue.value.push({ name: (file as string).split('/').pop() || 'unknown', progress: 0, instant: 0, avg: 0 });
+  const fileName = (file as string).split(/[/\\]/).pop() || 'unknown';
+
+  uploadQueue.value.push({ name: fileName, progress: 0, instant: 0, avg: 0 });
 
   await invoke<string>("upload_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, filePath: file as string })
     .then((response) => {
-      const target = uploadQueue.value.find(item => item.name === (file as string).split('/').pop());
+      const target = uploadQueue.value.find(item => item.name === fileName);
       if (target) {
         target.instant = null;
+        target.progress = 100;
       }
       writeLog(`(upload_file_front) Upload initiated: ${JSON.stringify(response)}`);
     })
@@ -169,6 +172,9 @@ function writeLog(message: string) {
           </div>
           <div class="download-actions">
             <div v-if="file.isDownloading" class="download-progress">
+              <div class="progress-info">
+                <span class="progress-percentage">{{ (file.progress ?? 0).toFixed(1) }}%</span>
+              </div>
               <div class="progress-bar">
                 <div class="progress-fill" :style="{ width: `${Math.min(file.progress ?? 0, 100)}%` }"></div>
               </div>
@@ -352,6 +358,17 @@ input:focus {
   width: 180px;
 }
 
+.progress-info {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.progress-percentage {
+  font-size: 13px;
+  font-weight: 600;
+  color: #60a5fa;
+}
+
 .download-speed {
   display: flex;
   justify-content: space-between;
@@ -400,17 +417,20 @@ input:focus {
 
 .progress-bar {
   position: relative;
-  height: 8px;
+  height: 12px;
   flex: 1;
-  background-color: rgba(31, 41, 55, 0.8);
+  background-color: rgba(31, 41, 55, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 999px;
   overflow: hidden;
+  min-width: 100px;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #4b5563 0%, #9ca3af 100%);
+  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
   transition: width 0.3s ease;
+  min-width: 2px;
 }
 
 .log-surface {
