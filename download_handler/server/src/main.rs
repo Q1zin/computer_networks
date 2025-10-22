@@ -74,6 +74,14 @@ fn handle_upload(stream: &mut TcpStream) -> std::io::Result<()> {
     let elapsed = transfer_start.elapsed().as_secs_f64();
     let size_mb = total_read as f64 / (1024.0 * 1024.0);
     let speed = if elapsed > 0.0 { size_mb / elapsed } else { 0.0 };
+    
+    if actual_size != file_size {
+        println!("ERROR: File size mismatch for '{}': expected {} bytes, got {} bytes", 
+                  file_name, file_size, actual_size);
+        stream.write_all(b"ERROR\n")?;
+        return Ok(());
+    }
+    
     println!(
         "Received '{}' -> {:.2} MB in {:.3} s ({:.2} MB/s)",
         file_name,
@@ -81,11 +89,7 @@ fn handle_upload(stream: &mut TcpStream) -> std::io::Result<()> {
         elapsed,
         speed
     );
-    if actual_size == file_size {
-        stream.write_all(b"OK\n")?;
-    } else {
-        stream.write_all(b"ERROR\n")?;
-    }
+    stream.write_all(b"OK\n")?;
     Ok(())
 }
 
@@ -130,6 +134,13 @@ fn handle_download(stream: &mut TcpStream) -> std::io::Result<()> {
     let elapsed = transfer_start.elapsed().as_secs_f64();
     let size_mb = total_written as f64 / (1024.0 * 1024.0);
     let speed = if elapsed > 0.0 { size_mb / elapsed } else { 0.0 };
+    
+    if total_written != file_size {
+        println!("ERROR: Download incomplete for '{}': sent {} bytes, expected {} bytes",
+                  requested_name, total_written, file_size);
+        return Ok(());
+    }
+    
     println!(
         "Sent '{}' -> {:.2} MB in {:.3} s ({:.2} MB/s)",
         requested_name,

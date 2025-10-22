@@ -91,9 +91,22 @@ where
     let avg_speed = (total_size as f64 / (1024.0 * 1024.0)) / total_elapsed;
     on_progress(100.0, 0.0, avg_speed);
 
+    if sent_bytes != total_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Upload incomplete: sent {} bytes, expected {} bytes", sent_bytes, total_size)
+        ));
+    }
+
     let mut resp = String::new();
     stream.read_to_string(&mut resp)?;
-    println!("Server response: {}\n", resp.trim());
+    
+    if !resp.trim().starts_with("OK") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Server rejected file: {}", resp.trim())
+        ));
+    }
 
     Ok(())
 }
@@ -160,6 +173,13 @@ where
     let total_elapsed = start_time.elapsed().as_secs_f64().max(1e-6);
     let avg_speed = (received as f64 / (1024.0 * 1024.0)) / total_elapsed;
     on_progress(100.0, 0.0, avg_speed);
+
+    if received != total_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("Download incomplete: received {} bytes, expected {} bytes", received, total_size)
+        ));
+    }
 
     Ok(())
 }
