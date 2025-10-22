@@ -1,7 +1,7 @@
 use client_api::{upload_file, download_file, fetch_available_files, RemoteFileInfo};
 use std::{env, path::Path};
 use tauri::{AppHandle, Emitter};
-use std::sync::{OnceLock};
+use std::sync::OnceLock;
 
 pub static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
@@ -28,7 +28,25 @@ async fn download_file_front(
         .map(|home| {
             let server_addr = format!("{}:{}", server_ip, server_port);
             let destination = home.join("Downloads").join(file_name);
-            let result = download_file(file_name, &destination, &server_addr);
+            let result = download_file(file_name, &destination, &server_addr, |progress, instant, avg: f64| {
+                let app_handle: &AppHandle = APP_HANDLE.get().expect("AppHandle not initialized");
+                let file_name = destination
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                let response = ProgressData {
+                    name: file_name,
+                    progress,
+                    instant,
+                    avg,
+                };
+
+                app_handle.emit("download_progress", &response).unwrap();
+                println!("Progress: {:6.2}% | Now: {:6.2} MB/s | Avg: {:6.2} MB/s | File: {}", progress, instant, avg, response.name);
+            });
+
+            
             match result {
                 Ok(_) => Ok(format!(
                     "File '{}' downloaded successfully to {:?}",

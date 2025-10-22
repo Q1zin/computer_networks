@@ -7,8 +7,21 @@ import { open } from '@tauri-apps/plugin-dialog';
 const serverIp = ref("127.0.0.1");
 const serverPort = ref("4000");
 
-type AvailableFile = { name: string; size_mb: number };
-type UploadFile = { name: string; progress: number; instant: number | null; avg: number };
+type AvailableFile = { 
+  name: string; 
+  size_mb: number;
+  isDownloading?: boolean;
+  progress?: number;
+  instant?: number;
+  avg?: number
+};
+
+type UploadFile = { 
+  name: string; 
+  progress: number; 
+  instant: number | null; 
+  avg: number 
+};
 
 const downloadFiles = ref<AvailableFile[]>([]);
 
@@ -16,13 +29,27 @@ const uploadQueue = ref<UploadFile[]>([]);
 
 const logs = ref<string[]>([]);
 
-function mockDownload(file: { name: string }) {
-  invoke<string>("download_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, fileName: file.name })
-    .then((response) => {
+function mockDownload(file: AvailableFile) {
+  const target = downloadFiles.value.find(item => item.name === file.name);
+  if (!target || target.isDownloading) {
+    return;
+  }
+
+  target.isDownloading = true;
+  target.progress = 0;
+  target.instant = 0;
+  target.avg = 0;
+
+  invoke<string>("download_file_front", {
+    serverIp: serverIp.value,
+    serverPort: serverPort.value,
+    fileName: file.name,
+  }).then((response) => {
       writeLog(`(download_file_front) Download initiated: ${JSON.stringify(response)}`);
     })
     .catch((error) => {
       writeLog(`Error downloading: ${error}`);
+      target.isDownloading = false;
     });
 }
 
@@ -36,7 +63,6 @@ async function mockUpload() {
 
   await invoke<string>("upload_file_front", { serverIp: serverIp.value, serverPort: serverPort.value, filePath: file as string })
     .then((response) => {
-      uploadQueue.value.find(item => item.name === (file as string).split('/').pop())!.instant = null;
       writeLog(`(upload_file_front) Upload initiated: ${JSON.stringify(response)}`);
     })
     .catch((error) => {
@@ -71,8 +97,19 @@ const addListeners = async () => {
     const file = uploadQueue.value.find(item => item.name === payload.name);
     if (file) {
       file.progress = payload.progress;
+      file.instant = payload.instant ? payload.instant : null;
+      file.avg = payload.avg;
+    }
+  });
+
+  listen<ProgressData>("download_progress", ({ payload }) => {
+    console.log("Download progress:", payload);
+    const file = downloadFiles.value.find(item => item.name === payload.name);
+    if (file) {
+      file.progress = payload.progress;
       file.instant = payload.instant;
       file.avg = payload.avg;
+      file.isDownloading = payload.progress < 100;
     }
   });
 }
@@ -126,7 +163,18 @@ function writeLog(message: string) {
             <span class="file-name">{{ file.name }}</span>
             <span class="file-size">{{ file.size_mb.toFixed(2) }} MB</span>
           </div>
-          <button class="ghost-button" @click="mockDownload(file)">Download</button>
+          <div class="download-actions">
+            <div v-if="file.isDownloading" class="download-progress">
+              <div class="progress-bar">
+                <div class="progress-fill" :style="{ width: `${Math.min(file.progress ?? 0, 100)}%` }"></div>
+              </div>
+              <div class="download-speed">
+                <span>Instant: {{ (file.instant ?? 0).toFixed(2) }} MB/s</span>
+                <span>Avg: {{ (file.avg ?? 0).toFixed(2) }} MB/s</span>
+              </div>
+            </div>
+            <button v-else class="ghost-button" @click="mockDownload(file)">Download</button>
+          </div>
         </li>
       </ul>
     </section>
@@ -283,6 +331,28 @@ input:focus {
 .progress-label {
   color: #6b7280;
   font-size: 13px;
+}
+
+.download-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.download-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 180px;
+}
+
+.download-speed {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #9ca3af;
 }
 
 .ghost-button,

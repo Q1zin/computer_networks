@@ -98,7 +98,10 @@ where
     Ok(())
 }
 
-pub fn download_file(file_name: &str, destination: &Path, server_addr: &str) -> std::io::Result<()> {
+pub fn download_file<F>(file_name: &str, destination: &Path, server_addr: &str, mut on_progress: F) -> std::io::Result<()> 
+where
+    F: FnMut(f64, f64, f64),
+{
     let mut stream = TcpStream::connect(server_addr)?;
     stream.write_all(&[b'D'])?;
 
@@ -112,34 +115,51 @@ pub fn download_file(file_name: &str, destination: &Path, server_addr: &str) -> 
         let mut buf = vec![0u8; msg_len];
         stream.read_exact(&mut buf)?;
         let message = String::from_utf8(buf).unwrap_or_else(|_| "Unknown error".to_string());
-        println!("Download failed: {}", message);
-        return Ok(());
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, message));
     }
 
-    let size = stream.read_u64::<BigEndian>()?;
+    let total_size = stream.read_u64::<BigEndian>()?;
     let mut file = File::create(destination)?;
-    let mut remaining = size;
+
+    let mut received: u64 = 0;
     let mut buffer = [0u8; 8192];
-    let transfer_start = Instant::now();
-    while remaining > 0 {
-        let to_read = std::cmp::min(buffer.len() as u64, remaining) as usize;
-        let n = stream.read(&mut buffer[..to_read])?;
+    let start_time = Instant::now();
+    let mut last_time = Instant::now();
+    let mut last_received: u64 = 0;
+
+    loop {
+        let n = stream.read(&mut buffer)?;
         if n == 0 {
             break;
         }
         file.write_all(&buffer[..n])?;
-        remaining -= n as u64;
+        received += n as u64;
+
+        let now = Instant::now();
+        let elapsed_since_last = now.duration_since(last_time);
+
+        if elapsed_since_last.as_millis() > 150 {
+            let progress = (received as f64 / total_size as f64) * 100.0;
+            let total_elapsed = now.duration_since(start_time).as_secs_f64().max(1e-6);
+
+            let delta = received - last_received;
+            let instant = (delta as f64 / (1024.0 * 1024.0)) / elapsed_since_last.as_secs_f64();
+            let avg = (received as f64 / (1024.0 * 1024.0)) / total_elapsed;
+
+            on_progress(progress, instant, avg);
+
+            last_received = received;
+            last_time = now;
+        }
+
+        if received >= total_size {
+            break;
+        }
     }
 
-    let elapsed = transfer_start.elapsed().as_secs_f64();
-    let size_mb = size as f64 / (1024.0 * 1024.0);
-    let speed = if elapsed > 0.0 { size_mb / elapsed } else { 0.0 };
-    println!(
-        "Downloaded {:.2} MB to {:?} in {:.3} s ({:.2} MB/s)",
-        size_mb,
-        destination,
-        elapsed,
-        speed
-    );
+    let total_elapsed = start_time.elapsed().as_secs_f64().max(1e-6);
+    let avg_speed = (received as f64 / (1024.0 * 1024.0)) / total_elapsed;
+    on_progress(100.0, 0.0, avg_speed);
+
     Ok(())
 }
