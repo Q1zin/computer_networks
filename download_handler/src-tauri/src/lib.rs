@@ -28,18 +28,19 @@ async fn download_file_front(
         .map(|home| {
             let server_addr = format!("{}:{}", server_ip, server_port);
             let destination = home.join("Downloads").join(file_name);
-            let result = download_file(file_name, &destination, &server_addr, |progress, instant, avg: f64| {
+            let result = download_file(file_name, &destination, &server_addr, |progress, instant, avg, time: f64| {
                 let app_handle: &AppHandle = APP_HANDLE.get().expect("AppHandle not initialized");
                 let file_name = destination
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
                         .to_string();
-                let response = ProgressData {
+                let response = ProgressDataDownload {
                     name: file_name,
                     progress,
                     instant,
                     avg,
+                    time
                 };
 
                 app_handle.emit("download_progress", &response).unwrap();
@@ -58,6 +59,15 @@ async fn download_file_front(
         .unwrap_or_else(|| Err("Home directory not found".to_string()));
 
     Ok("Download initiated".to_string())
+}
+
+#[derive(serde::Serialize)]
+struct ProgressDataDownload {
+    name: String,
+    progress: f64,
+    instant: f64,
+    avg: f64,
+    time: f64
 }
 
 #[derive(serde::Serialize)]

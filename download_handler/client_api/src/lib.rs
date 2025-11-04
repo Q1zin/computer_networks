@@ -40,12 +40,16 @@ where
     let metadata = file.metadata()?;
     let total_size = metadata.len();
 
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Bad file name"))?
-        .as_bytes()
-        .to_owned();
+    let file_name_full = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Bad file name"))?;
+    let file_name_len = file_name_full.len();
+    if file_name_len > 4096 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("You have a very long file name, len = {}", file_name_len)
+        ));
+    }
+    
+    let file_name = file_name_full.as_bytes().to_owned();
 
     let mut stream = TcpStream::connect(server_addr)?;
     stream.write_all(&[b'U'])?;
@@ -113,11 +117,11 @@ where
 
 pub fn download_file<F>(file_name: &str, destination: &Path, server_addr: &str, mut on_progress: F) -> std::io::Result<()> 
 where
-    F: FnMut(f64, f64, f64),
+    F: FnMut(f64, f64, f64, f64),
 {
     let mut stream = TcpStream::connect(server_addr)?;
     stream.write_all(&[b'D'])?;
-
+    
     let name_bytes = file_name.as_bytes();
     stream.write_u16::<BigEndian>(name_bytes.len() as u16)?;
     stream.write_all(name_bytes)?;
@@ -158,8 +162,8 @@ where
             let delta = received - last_received;
             let instant = (delta as f64 / (1024.0 * 1024.0)) / elapsed_since_last.as_secs_f64();
             let avg = (received as f64 / (1024.0 * 1024.0)) / total_elapsed;
-
-            on_progress(progress, instant, avg);
+            let time_now = start_time.elapsed().as_secs_f64().max(1e-6);
+            on_progress(progress, instant, avg, time_now);
 
             last_received = received;
             last_time = now;
@@ -172,9 +176,16 @@ where
 
     let total_elapsed = start_time.elapsed().as_secs_f64().max(1e-6);
     let avg_speed = (received as f64 / (1024.0 * 1024.0)) / total_elapsed;
-    on_progress(100.0, 0.0, avg_speed);
+    let end_time = start_time.elapsed().as_secs_f64().max(1e-6);
+    on_progress(100.0, 0.0, avg_speed, end_time);
 
     if received != total_size {
+        println!("ERROR: File size mismatch for '{}': expected {} bytes, got {} bytes", file_name, total_size, received);
+        drop(file);
+        match std::fs::remove_file(&destination) {
+            Ok(_) => println!("Corrupted file '{}' has been deleted", file_name),
+            Err(e) => println!("Failed to delete corrupted file '{}': {}", file_name, e),
+        }
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             format!("Download incomplete: received {} bytes, expected {} bytes", received, total_size)

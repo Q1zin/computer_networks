@@ -30,6 +30,12 @@ fn ensure_uploads_dir() -> std::io::Result<PathBuf> {
 
 fn handle_upload(stream: &mut TcpStream) -> std::io::Result<()> {
     let name_len = stream.read_u16::<BigEndian>()? as usize;
+    if name_len > 4096 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("You have very big name_file, len = {}", name_len)
+        ));
+    }
 
     let mut name_buf = vec![0u8; name_len];
     stream.read_exact(&mut name_buf)?;
@@ -76,8 +82,12 @@ fn handle_upload(stream: &mut TcpStream) -> std::io::Result<()> {
     let speed = if elapsed > 0.0 { size_mb / elapsed } else { 0.0 };
     
     if actual_size != file_size {
-        println!("ERROR: File size mismatch for '{}': expected {} bytes, got {} bytes", 
-                  file_name, file_size, actual_size);
+        println!("ERROR: File size mismatch for '{}': expected {} bytes, got {} bytes", file_name, file_size, actual_size);
+        drop(file);
+        match std::fs::remove_file(&canonical_target) {
+            Ok(_) => println!("Corrupted file '{}' has been deleted", file_name),
+            Err(e) => println!("Failed to delete corrupted file '{}': {}", file_name, e),
+        }
         stream.write_all(b"ERROR\n")?;
         return Ok(());
     }
@@ -177,8 +187,8 @@ fn handle_list(stream: &mut TcpStream) -> std::io::Result<()> {
 fn main() -> std::io::Result<()> {
     let active_connections = Arc::new(Mutex::new(0usize));
     
-    let listener = TcpListener::bind("0.0.0.0:4000")?;
-    println!("Listening on port 4000...");
+    let listener = TcpListener::bind("127.0.0.1:4000")?;
+    println!("Listening on port 5000...");
     println!("Max concurrent connections: {}", MAX_CONNECTIONS);
     
     for stream in listener.incoming() {
@@ -194,7 +204,6 @@ fn main() -> std::io::Result<()> {
                 }
                 
                 *count += 1;
-                let current = *count;
                 drop(count);
                 
                 println!("Client connected. id {}", &s.peer_addr().unwrap());

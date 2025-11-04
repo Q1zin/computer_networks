@@ -14,6 +14,7 @@ type AvailableFile = {
   progress?: number;
   instant?: number;
   avg?: number
+  time?: number
 };
 
 type UploadFile = { 
@@ -98,6 +99,14 @@ type ProgressData = {
   avg: number;
 };
 
+type ProgressDataDownload = {
+  name: string;
+  progress: number;
+  instant: number;
+  avg: number;
+  time: number
+};
+
 const addListeners = async () => {
   listen<ProgressData>("upload_progress", ({ payload }) => {
     console.log("Upload progress:", payload);
@@ -109,13 +118,14 @@ const addListeners = async () => {
     }
   });
 
-  listen<ProgressData>("download_progress", ({ payload }) => {
+  listen<ProgressDataDownload>("download_progress", ({ payload }) => {
     console.log("Download progress:", payload);
     const file = downloadFiles.value.find(item => item.name === payload.name);
     if (file) {
       file.progress = payload.progress;
       file.instant = payload.instant;
       file.avg = payload.avg;
+      file.time = payload.time;
       file.isDownloading = payload.progress < 100;
     }
   });
@@ -169,6 +179,7 @@ function writeLog(message: string) {
           <div class="file-info">
             <span class="file-name">{{ file.name }}</span>
             <span class="file-size">{{ file.size_mb.toFixed(2) }} MB</span>
+            <span class="file-size">{{ file.time }} sec</span>
           </div>
           <div class="download-actions">
             <div v-if="file.isDownloading" class="download-progress">
