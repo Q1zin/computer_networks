@@ -525,7 +525,13 @@ fn update_man(
         direction = direction.normalize();
     }
 
-    let speed = 200.0;
+    let base_speed = 200.0;
+    
+    let speed = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        base_speed * 0.5
+    } else {
+        base_speed
+    };
 
     transform.translation += direction.extend(0.0) * speed * time.delta_secs();
     
