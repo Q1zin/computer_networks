@@ -15,6 +15,8 @@ const MAX_LONGITUDE: f32 = 180.0;
 const MIN_LATITUDE: f32 = -90.0;
 const MAX_LATITUDE: f32 = 90.0;
 
+const MAX_LENGTH_WIKIPEDIA_SUMMARY: usize = 80;
+
 fn get_weather_api_key() -> String {
     std::env::var("WEATHER_API_KEY").unwrap_or_else(|_| "YOUR_API_KEY".to_string())
 }
@@ -62,6 +64,9 @@ struct StatusText;
 #[derive(Component)]
 struct GameMap;
 
+#[derive(Component)]
+struct WikipediaText;
+
 #[derive(Debug, Deserialize)]
 struct WeatherResponse {
     main: MainWeather,
@@ -103,15 +108,24 @@ struct WeatherData {
     description: String,
 }
 
+#[derive(Debug, Clone)]
+enum ApiUpdate {
+    Weather(WeatherData),
+    Wikipedia {
+        location: String,
+        summary: Option<String>,
+    },
+}
+
 #[derive(Resource)]
 struct ApiChannel {
-    sender: mpsc::UnboundedSender<Result<WeatherData, String>>,
-    receiver: mpsc::UnboundedReceiver<Result<WeatherData, String>>,
+    sender: mpsc::UnboundedSender<Result<ApiUpdate, String>>,
+    receiver: mpsc::UnboundedReceiver<Result<ApiUpdate, String>>,
 }
 
 impl Default for ApiChannel {
     fn default() -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel::<Result<WeatherData, String>>();
+        let (sender, receiver) = mpsc::unbounded_channel::<Result<ApiUpdate, String>>();
         Self { sender, receiver }
     }
 }
@@ -203,6 +217,9 @@ fn setup_app(
             Node {
                 width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(15.0)),
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(10.0),
                 ..Default::default()
             }
         ).with_children(|p| {
@@ -215,16 +232,23 @@ fn setup_app(
                 },
                 WeatherText,
             ));
+            p.spawn((
+                Text::new("Wikipedia summary will\nappear here..."),
+                TextFont {
+                    font: ui_font.clone(),
+                    font_size: 16.0,
+                    ..default()
+                },
+                WikipediaText,
+            ));
         }).insert(BackgroundColor(Color::srgba(0.1, 0.15, 0.1, 0.8)));
     });
 }
 
-async fn fetch_weather_data(lat: f32, lon: f32) -> Result<WeatherData, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
-    
+async fn fetch_weather_data(client: &reqwest::Client, lat: f32, lon: f32) -> Result<WeatherData, Box<dyn std::error::Error + Send + Sync>> {
     let (weather_result, geocode_result) = tokio::join!(
-        fetch_weather(&client, lat, lon),
-        fetch_geocode(&client, lat, lon)
+        fetch_weather(client, lat, lon),
+        fetch_geocode(client, lat, lon),
     );
     
     let weather = weather_result?;
@@ -266,11 +290,55 @@ async fn fetch_geocode(client: &reqwest::Client, lat: f32, lon: f32) -> Result<G
     geocode_list.pop().ok_or_else(|| "No location found".into())
 }
 
+async fn fetch_wikipedia_description(
+    client: &reqwest::Client,
+    title: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let response = client
+        .get("https://en.wikipedia.org/w/api.php")
+        .query(&[
+            ("action", "query"),
+            ("format", "json"),
+            ("prop", "extracts"),
+            ("exintro", "1"),
+            ("explaintext", "1"),
+            ("redirects", "1"),
+            ("titles", title),
+        ])
+        .header("User-Agent", "WeatherApp/1.0")
+        .send()
+        .await?;
+
+    let json: serde_json::Value = response.json().await?;
+    let pages = json
+        .get("query")
+        .and_then(|q| q.get("pages"))
+        .and_then(|p| p.as_object());
+
+    if let Some(pages) = pages {
+        for (page_id, page) in pages.iter() {
+            if page_id == "-1" {
+                continue;
+            }
+
+            if let Some(extract) = page.get("extract").and_then(|e| e.as_str()) {
+                if !extract.is_empty() {
+                    return Ok(Some(extract.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn check_space_key(
     keys: Res<ButtonInput<KeyCode>>,
     man_query: Query<&Man>,
     api_channel: Res<ApiChannel>,
     mut status_query: Query<&mut Text, With<StatusText>>,
+    mut weather_query: Query<&mut Text, (With<WeatherText>, Without<StatusText>, Without<WikipediaText>)>,
+    mut wiki_query: Query<&mut Text, (With<WikipediaText>, Without<StatusText>, Without<WeatherText>)>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
         if let Ok(man) = man_query.single() {
@@ -280,6 +348,14 @@ fn check_space_key(
 
             if let Ok(mut text) = status_query.single_mut() {
                 **text = "Loading...".to_string();
+            }
+
+            if let Ok(mut weather_text) = weather_query.single_mut() {
+                **weather_text = "Loading weather data...".to_string();
+            }
+
+            if let Ok(mut wiki_text) = wiki_query.single_mut() {
+                **wiki_text = "Loading Wikipedia summary...".to_string();
             }
 
             std::thread::spawn(move || {
@@ -294,15 +370,55 @@ fn check_space_key(
                     }
                 };
 
-                match rt.block_on(fetch_weather_data(lat, lon)) {
-                    Ok(data) => {
-                        println!("Weather data received for {}, {}", data.city, data.country);
-                        let _ = sender.send(Ok(data));
+                let sender_weather = sender.clone();
+                let sender_wiki = sender.clone();
+
+                let result = rt.block_on(async move {
+                    let client = reqwest::Client::new();
+                    let weather_data = fetch_weather_data(&client, lat, lon).await?;
+
+                    let region = weather_data.region.clone();
+                    let _ = sender_weather.send(Ok(ApiUpdate::Weather(weather_data)));
+
+                    match fetch_wikipedia_description(&client, &region).await {
+                        Ok(summary) => {
+                            let Some(text) = &summary else {
+                                println!("No Wikipedia summary found for {}", region);
+                                let _ = sender_wiki.send(Ok(ApiUpdate::Wikipedia {
+                                    location: region,
+                                    summary: None,
+                                }));
+                                return Ok(());
+                            };
+
+                            let final_text = if text.chars().count() > MAX_LENGTH_WIKIPEDIA_SUMMARY {
+                                let truncated: String = text.chars().take(MAX_LENGTH_WIKIPEDIA_SUMMARY - 3).collect();
+                                format!("{}...", truncated)
+                            } else {
+                                text.clone()
+                            };
+                            
+
+                            let _ = sender_wiki.send(Ok(ApiUpdate::Wikipedia {
+                                location: region,
+                                summary: Some(final_text),
+                            }));
+                        }
+                        Err(err) => {
+                            println!("Wikipedia request failed for {}: {}", region, err);
+                            let _ = sender_wiki.send(Ok(ApiUpdate::Wikipedia {
+                                location: region,
+                                summary: None,
+                            }));
+                        }
                     }
-                    Err(e) => {
-                        println!("Error: {}", e);
-                        let _ = sender.send(Err(e.to_string()));
-                    }
+
+                    Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                });
+
+                if let Err(e) = result {
+                    println!("Error: {}", e);
+                    let _ = sender.send(Err(e.to_string()));
                 }
             });
             
@@ -313,12 +429,13 @@ fn check_space_key(
 
 fn process_api_responses(
     mut api_channel: ResMut<ApiChannel>,
-    mut weather_query: Query<&mut Text, (With<WeatherText>, Without<StatusText>)>,
+    mut weather_query: Query<&mut Text, (With<WeatherText>, Without<StatusText>, Without<WikipediaText>)>,
+    mut wiki_query: Query<&mut Text, (With<WikipediaText>, Without<StatusText>, Without<WeatherText>)>,
     mut status_query: Query<&mut Text, With<StatusText>>,
 ) {
     while let Ok(result) = api_channel.receiver.try_recv() {
         match result {
-            Ok(data) => {
+            Ok(ApiUpdate::Weather(data)) => {
                 if let Ok(mut weather_text) = weather_query.single_mut() {
                     **weather_text = format!(
                         "{},\n{},\n{}\n\n{}\n{}\n{:.1}\n{:.1} m/s",
@@ -333,6 +450,29 @@ fn process_api_responses(
                 }
 
                 if let Ok(mut status_text) = status_query.single_mut() {
+                    **status_text = "Weather loaded\nFetching Wikipedia...".to_string();
+                }
+            }
+            Ok(ApiUpdate::Wikipedia { location, summary }) => {
+                if let Ok(mut wiki_text) = wiki_query.single_mut() {
+                    match summary {
+                        Some(text) => {
+                            **wiki_text = format!(
+                                "Wikipedia: {}\n{}",
+                                location,
+                                text
+                            );
+                        }
+                        None => {
+                            **wiki_text = format!(
+                                "Wikipedia: {}",
+                                location
+                            );
+                        }
+                    }
+                }
+
+                if let Ok(mut status_text) = status_query.single_mut() {
                     **status_text = "Loaded!\nPress SPACE".to_string();
                 }
             }
@@ -343,6 +483,10 @@ fn process_api_responses(
 
                 if let Ok(mut weather_text) = weather_query.single_mut() {
                     **weather_text = "Weather data will\nappear here...".to_string();
+                }
+
+                if let Ok(mut wiki_text) = wiki_query.single_mut() {
+                    **wiki_text = "Wikipedia summary will\nappear here...".to_string();
                 }
             }
         }
