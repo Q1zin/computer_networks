@@ -1,4 +1,5 @@
 mod connection;
+mod dns;
 mod handler;
 mod server;
 mod socks5;

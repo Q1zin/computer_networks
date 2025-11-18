@@ -1,5 +1,6 @@
 use crate::{
     connection::{Connection, EndpointKind},
+    dns::DnsResolver,
     socks5::{protocol::*, state::ClientState},
 };
 use log::{error, info, warn};
@@ -16,10 +17,11 @@ pub fn handle_readable(
     registry: &mio::Registry,
     token_map: &mut HashMap<Token, (usize, EndpointKind)>,
     next_token: &mut usize,
+    dns_resolver: &mut DnsResolver,
 ) -> Result<()> {
     match endpoint {
         EndpointKind::Client => {
-            handle_client_readable(conn, conn_id, registry, token_map, next_token)
+            handle_client_readable(conn, conn_id, registry, token_map, next_token, dns_resolver)
         }
         EndpointKind::Target => handle_target_readable(conn, registry),
     }
@@ -31,12 +33,14 @@ fn handle_client_readable(
     registry: &mio::Registry,
     token_map: &mut HashMap<Token, (usize, EndpointKind)>,
     next_token: &mut usize,
+    dns_resolver: &mut DnsResolver,
 ) -> Result<()> {
     match conn.state {
         ClientState::Handshake => handle_handshake(conn),
-        ClientState::Request => handle_request(conn, conn_id, registry, token_map, next_token),
+        ClientState::Request => handle_request(conn, conn_id, registry, token_map, next_token, dns_resolver),
         ClientState::Tunneling => handle_client_data(conn, registry),
         ClientState::Connecting => Ok(()),
+        ClientState::Resolving => Ok(()),
     }
 }
 
@@ -81,6 +85,7 @@ fn handle_request(
     registry: &mio::Registry,
     token_map: &mut HashMap<Token, (usize, EndpointKind)>,
     next_token: &mut usize,
+    dns_resolver: &mut DnsResolver,
 ) -> Result<()> {
     let mut buf = [0u8; 512];
     match conn.client.read(&mut buf) {
@@ -91,37 +96,56 @@ fn handle_request(
         Ok(n) => {
             conn.client_buf.extend_from_slice(&buf[..n]);
             if let Some(request_info) = parse_request(&conn.client_buf)? {
-                info!(
-                    "[conn {conn_id}] Client {} requested {}",
-                    conn.client_addr, request_info.display
-                );
-                conn.requested_endpoint = Some(request_info.display.clone());
+                match request_info {
+                    RequestInfo::Resolved { addr, display } => {
+                        info!(
+                            "[conn {conn_id}] Client {} requested {}",
+                            conn.client_addr, display
+                        );
+                        conn.requested_endpoint = Some(display.clone());
 
-                match TcpStream::connect(request_info.resolved) {
-                    Ok(mut stream) => {
-                        let target_token = Token(*next_token);
-                        *next_token += 1;
-                        registry.register(&mut stream, target_token, Interest::WRITABLE)?;
-                        token_map.insert(target_token, (conn_id, EndpointKind::Target));
-                        conn.target = Some(stream);
-                        conn.target_token = Some(target_token);
-                        conn.state = ClientState::Connecting;
-                        if let Some(ref endpoint) = conn.requested_endpoint {
-                            info!("[conn {conn_id}] Connecting to target {endpoint}");
+                        match TcpStream::connect(addr) {
+                            Ok(mut stream) => {
+                                let target_token = Token(*next_token);
+                                *next_token += 1;
+                                registry.register(&mut stream, target_token, Interest::WRITABLE)?;
+                                token_map.insert(target_token, (conn_id, EndpointKind::Target));
+                                conn.target = Some(stream);
+                                conn.target_token = Some(target_token);
+                                conn.state = ClientState::Connecting;
+                                info!("[conn {conn_id}] Connecting to target {}", display);
+                                conn.client_buf.clear();
+                            }
+                            Err(_) => {
+                                let response = create_refused_response();
+                                conn.client.write_all(&response)?;
+                                error!("[conn {conn_id}] Connection to {} refused", display);
+                                return Err(Error::new(
+                                    ErrorKind::ConnectionRefused,
+                                    "Connection refused",
+                                ));
+                            }
                         }
-                        conn.client_buf.clear();
                     }
-                    Err(_) => {
-                        let response = create_refused_response();
-                        conn.client.write_all(&response)?;
-                        if let Some(ref endpoint) = conn.requested_endpoint {
-                            error!("[conn {conn_id}] Connection to {endpoint} refused");
+                    RequestInfo::NeedsResolution { domain, port } => {
+                        info!(
+                            "[conn {conn_id}] Client {} requested {}:{} (needs DNS resolution)",
+                            conn.client_addr, domain, port
+                        );
+                        
+                        match dns_resolver.resolve(domain, port, conn_id) {
+                            Ok(query_id) => {
+                                conn.state = ClientState::Resolving;
+                                conn.client_buf.clear();
+                                info!("[conn {conn_id}] DNS query started (query_id: {})", query_id);
+                            }
+                            Err(e) => {
+                                error!("[conn {conn_id}] Failed to start DNS resolution: {}", e);
+                                let response = create_refused_response();
+                                conn.client.write_all(&response)?;
+                                return Err(e);
+                            }
                         }
-
-                        return Err(Error::new(
-                            ErrorKind::ConnectionRefused,
-                            "Connection refused",
-                        ));
                     }
                 }
             }

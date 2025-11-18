@@ -1,6 +1,6 @@
 use log::error;
 use std::io::{Error, ErrorKind, Result};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 
 pub const SOCKS_VERSION: u8 = 0x05;
 pub const NO_AUTH: u8 = 0x00;
@@ -12,9 +12,9 @@ pub const REP_CONN_REFUSED: u8 = 0x05;
 pub const BUFFER_SIZE: usize = 8192;
 
 #[derive(Debug, Clone)]
-pub struct RequestInfo {
-    pub resolved: SocketAddr,
-    pub display: String,
+pub enum RequestInfo {
+    Resolved { addr: SocketAddr, display: String },
+    NeedsResolution { domain: String, port: u16 },
 }
 
 pub fn parse_request(buf: &[u8]) -> Result<Option<RequestInfo>> {
@@ -64,8 +64,8 @@ fn parse_ipv4_request(buf: &[u8]) -> Result<Option<RequestInfo>> {
         }
     };
 
-    Ok(Some(RequestInfo {
-        resolved: socket,
+    Ok(Some(RequestInfo::Resolved {
+        addr: socket,
         display: addr,
     }))
 }
@@ -78,22 +78,10 @@ fn parse_domain_request(buf: &[u8]) -> Result<Option<RequestInfo>> {
     if buf.len() < 5 + len + 2 {
         return Ok(None);
     }
-    let domain = String::from_utf8_lossy(&buf[5..5 + len]);
+    let domain = String::from_utf8_lossy(&buf[5..5 + len]).to_string();
     let port = u16::from_be_bytes([buf[5 + len], buf[5 + len + 1]]);
-    let addr = format!("{}:{}", domain, port);
-    let mut addrs = addr.to_socket_addrs()?;
-    if let Some(resolved) = addrs.next() {
-        Ok(Some(RequestInfo {
-            resolved,
-            display: addr,
-        }))
-    } else {
-        error!("No address resolved for domain: {}", domain);
-        Err(Error::new(
-            ErrorKind::AddrNotAvailable,
-            "No address resolved",
-        ))
-    }
+
+    Ok(Some(RequestInfo::NeedsResolution { domain, port }))
 }
 
 pub fn create_success_response() -> [u8; 10] {
