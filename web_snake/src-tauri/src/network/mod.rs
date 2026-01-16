@@ -382,8 +382,8 @@ impl NetworkService {
                     last_ping_check = Instant::now();
                 }
 
-                // Периодически отправляем announcements (завязываем на delay, но не слишком часто)
-                let announcement_interval = Duration::from_millis((delay_ms * 10).max(1000));
+                // Периодически отправляем announcements (ТЗ: фиксированный интервал 1 секунда)
+                let announcement_interval = Duration::from_secs(1);
                 if last_announcement.elapsed() > announcement_interval {
                     use crate::game::state::GameMode;
                     
