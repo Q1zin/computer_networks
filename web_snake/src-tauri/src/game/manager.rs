@@ -45,6 +45,21 @@ impl GameManager {
         Ok(())
     }
 
+    /// Восстановление игры из снапшота и запуск в режиме MASTER (для deputy promotion).
+    pub fn takeover_from_snapshot(
+        &self,
+        config: GameConfig,
+        snapshot: GameState,
+        my_player_id: i32,
+    ) -> Result<()> {
+        let field = FieldImpl::from_snapshot(config.clone(), snapshot)?;
+        *self.field.lock().unwrap() = Some(field);
+        *self.config.lock().unwrap() = Some(config);
+        *self.my_player_id.lock().unwrap() = Some(my_player_id);
+        *self.last_tick.lock().unwrap() = Instant::now();
+        Ok(())
+    }
+
     /// Добавление нового игрока в игру (для Master)
     pub fn add_player(&self, player_name: String) -> Result<i32> {
         let mut field_guard = self.field.lock().unwrap();
@@ -206,9 +221,14 @@ impl GameManager {
         let last_tick = Arc::clone(&self.last_tick);
         let running = Arc::clone(&self.running);
         let config = Arc::clone(&self.config);
+        let my_player_id = Arc::clone(&self.my_player_id);
         let app_clone = app.clone();
 
         std::thread::spawn(move || {
+            println!("[game-loop-net] Thread started");
+            let mut tick_count = 0u32;
+            let mut master_snake_dead = false;
+            
             while running.load(Ordering::SeqCst) {
                 let delay_ms = {
                     let cfg_guard = config.lock().unwrap();
@@ -224,6 +244,7 @@ impl GameManager {
                 };
 
                 if should_update {
+                    tick_count += 1;
                     let mut field_guard = field.lock().unwrap();
                     if let Some(fld) = field_guard.as_mut() {
                         let mut steers_guard = pending_steers.lock().unwrap();
@@ -232,6 +253,34 @@ impl GameManager {
 
                         match fld.update(steers) {
                             Ok(new_state) => {
+                                if tick_count <= 3 {
+                                    println!("[game-loop-net] Tick #{}, state_order={}", tick_count, new_state.state_order);
+                                }
+                                
+                                // Проверяем, умерла ли змейка master'а
+                                let my_id = my_player_id.lock().unwrap().unwrap_or(0);
+                                let my_snake_alive = new_state.snakes.iter().any(|s| s.player_id == my_id);
+                                
+                                if !my_snake_alive && !master_snake_dead && my_id != 0 {
+                                    // Змейка master'а умерла - нужно стать viewer и передать роль deputy
+                                    println!("[game-loop-net] Master's snake died! Becoming spectator...");
+                                    master_snake_dead = true;
+                                    
+                                    // Останавливаем game loop - мы больше не master
+                                    running.store(false, Ordering::SeqCst);
+                                    
+                                    // Вызываем become_spectator для handoff на deputy
+                                    let network_clone = network.clone();
+                                    std::thread::spawn(move || {
+                                        if let Err(e) = network_clone.become_spectator() {
+                                            eprintln!("Failed to become spectator after death: {}", e);
+                                        }
+                                    });
+                                    
+                                    // Выходим из цикла
+                                    break;
+                                }
+                                
                                 // Получаем config для передачи в DTO
                                 let cfg_guard = config.lock().unwrap();
                                 let game_config = cfg_guard.as_ref().cloned().unwrap_or(GameConfig {
@@ -242,8 +291,23 @@ impl GameManager {
                                 });
                                 drop(cfg_guard);
                                 
+                                // Роли (в т.ч. DEPUTY) назначаются сетевым слоем.
+                                // Перед отрисовкой накладываем роли на State, чтобы не было
+                                // ситуации "2+ игроков, но в State нет deputy".
+                                let mut state_for_ui = new_state.clone();
+                                let players_snapshot = network.get_players();
+                                let mut role_by_id = std::collections::HashMap::<i32, i32>::new();
+                                for p in &players_snapshot.players {
+                                    role_by_id.insert(p.id, p.role);
+                                }
+                                for p in &mut state_for_ui.players.players {
+                                    if let Some(role) = role_by_id.get(&p.id) {
+                                        p.role = *role;
+                                    }
+                                }
+
                                 // Отправляем State через event используя DTO (для локального фронтенда)
-                                let state_dto = game_state_to_dto(&new_state, &game_config);
+                                let state_dto = game_state_to_dto(&state_for_ui, &game_config);
                                 let _ = app_clone.emit("game-state", state_dto);
                                 
                                 // Отправляем State по сети всем игрокам
@@ -257,11 +321,14 @@ impl GameManager {
                         }
 
                         *last_tick.lock().unwrap() = Instant::now();
+                    } else {
+                        println!("[game-loop-net] field is None!");
                     }
                 }
 
                 std::thread::sleep(Duration::from_millis(10));
             }
+            println!("[game-loop-net] Thread stopped");
         });
     }
 
@@ -275,6 +342,7 @@ impl GameManager {
         }
 
         let field_for_join = Arc::clone(&self.field);
+        let field_for_zombie = Arc::clone(&self.field);
         let field_for_left = Arc::clone(&self.field);
         let pending_steers_for_steer = Arc::clone(&self.pending_steers);
 
@@ -302,9 +370,24 @@ impl GameManager {
             }
             
             if let Ok(zombie_event) = serde_json::from_str::<ZombieEvent>(event.payload()) {
-                let mut field_guard = field_for_left.lock().unwrap();
+                let mut field_guard = field_for_zombie.lock().unwrap();
                 if let Some(field) = field_guard.as_mut() {
                     field.change_snake_to_zombie(zombie_event.player_id);
+                }
+            }
+        });
+
+        // Подписываемся на событие player-left для удаления игрока из field
+        app.listen("player-left", move |event| {
+            #[derive(serde::Deserialize)]
+            struct LeftEvent {
+                player_id: i32,
+            }
+            
+            if let Ok(left_event) = serde_json::from_str::<LeftEvent>(event.payload()) {
+                let mut field_guard = field_for_left.lock().unwrap();
+                if let Some(field) = field_guard.as_mut() {
+                    field.remove_player(left_event.player_id);
                 }
             }
         });

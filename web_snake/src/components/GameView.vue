@@ -90,6 +90,7 @@ async function becomeSpectator() {
 }
 
 let unlistenGameState: (() => void) | null = null;
+let unlistenPlayerLeft: (() => void) | null = null;
 
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyPress);
@@ -100,6 +101,14 @@ onMounted(async () => {
     gameFieldRef.value?.drawGame();
   });
   
+  // Слушаем событие удаления игрока
+  unlistenPlayerLeft = await listen<{ player_id: number }>("player-left", (event) => {
+    console.log("Player left:", event.payload.player_id);
+    gameState.value.players.players = gameState.value.players.players.filter(
+      p => p.id !== event.payload.player_id
+    );
+  });
+  
   gameFieldRef.value?.drawGame();
 });
 
@@ -108,6 +117,9 @@ onUnmounted(() => {
   
   if (unlistenGameState) {
     unlistenGameState();
+  }
+  if (unlistenPlayerLeft) {
+    unlistenPlayerLeft();
   }
 });
 

@@ -10,6 +10,85 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 
+impl FieldImpl {
+    /// Восстановление игрового поля из снапшота GameState.
+    ///
+    /// В протоколе Snake.points хранит «ключевые» точки: первая — абсолютная координата головы,
+    /// каждая следующая — относительное смещение следующей точки относительно предыдущей.
+    /// Наш движок хранит полное тело (список клеток), поэтому тут делаем обратное преобразование.
+    pub fn from_snapshot(config: GameConfig, snapshot: GameState) -> Result<Self> {
+        let width = config.width.unwrap_or(40);
+        let height = config.height.unwrap_or(30);
+
+        let mut snakes: HashMap<i32, SnakeModel> = HashMap::new();
+        for proto in &snapshot.snakes {
+            let model = Self::snake_from_proto(proto, width, height)?;
+            snakes.insert(model.player_id, model);
+        }
+
+        let mut foods: HashSet<Pos> = HashSet::new();
+        for f in &snapshot.foods {
+            let x = f.x.unwrap_or(0).rem_euclid(width);
+            let y = f.y.unwrap_or(0).rem_euclid(height);
+            foods.insert(Pos { x, y });
+        }
+
+        let rng = StdRng::from_rng(&mut rand::rng());
+
+        Ok(Self {
+            config,
+            width,
+            height,
+            snakes,
+            foods,
+            players: snapshot.players,
+            state_order: snapshot.state_order,
+            rng,
+        })
+    }
+
+    fn snake_from_proto(proto: &Snake, w: i32, h: i32) -> Result<SnakeModel> {
+        if proto.points.is_empty() {
+            return Err(anyhow!("Snake points is empty"));
+        }
+
+        let head_x = proto.points[0].x.unwrap_or(0).rem_euclid(w);
+        let head_y = proto.points[0].y.unwrap_or(0).rem_euclid(h);
+        let head = Pos { x: head_x, y: head_y };
+
+        let head_direction = Direction::from_i32(proto.head_direction).unwrap_or(Direction::Up);
+        let state = SnakeState::from_i32(proto.state).unwrap_or(SnakeState::Alive);
+
+        let mut body: Vec<Pos> = Vec::with_capacity(proto.points.len().max(2));
+        body.push(head);
+
+        let mut prev = head;
+        for delta in proto.points.iter().skip(1) {
+            let dx = delta.x.unwrap_or(0);
+            let dy = delta.y.unwrap_or(0);
+            let next = Pos {
+                x: (prev.x + dx).rem_euclid(w),
+                y: (prev.y + dy).rem_euclid(h),
+            };
+            body.push(next);
+            prev = next;
+        }
+
+        // Защита от некорректного снапшота: минимальная длина змейки — 2 клетки.
+        if body.len() == 1 {
+            let tail = Self::step(head, Self::opposite_dir(head_direction), w, h);
+            body.push(tail);
+        }
+
+        Ok(SnakeModel {
+            player_id: proto.player_id,
+            body,
+            state,
+            head_direction,
+        })
+    }
+}
+
 pub trait GameField: Send + Sync {
     fn new(config: GameConfig, players: GamePlayers) -> Self
     where
@@ -21,6 +100,7 @@ pub trait GameField: Send + Sync {
     fn spawn_food(&mut self);
     fn handle_death(&mut self, snake_id: i32);
     fn change_snake_to_zombie(&mut self, player_id: i32);
+    fn remove_player(&mut self, player_id: i32);
     fn config(&self) -> &GameConfig;
 }
 
@@ -403,6 +483,14 @@ impl GameField for FieldImpl {
         if let Some(player) = self.players.players.iter_mut().find(|p| p.id == player_id) {
             player.role = NodeRole::Viewer as i32;
         }
+    }
+
+    fn remove_player(&mut self, player_id: i32) {
+        // Удаляем змейку игрока
+        self.snakes.remove(&player_id);
+        // Удаляем игрока из списка
+        self.players.players.retain(|p| p.id != player_id);
+        println!("Player {} removed from field", player_id);
     }
 }
 

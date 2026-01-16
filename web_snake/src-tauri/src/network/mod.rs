@@ -113,6 +113,25 @@ pub struct NetworkService {
     seq: Arc<Mutex<i64>>,
 }
 
+fn overlay_player_meta_from_players(state: &mut GameState, players: &GamePlayers) {
+    use std::collections::HashMap;
+    let by_id: HashMap<i32, &GamePlayer> = players.players.iter().map(|p| (p.id, p)).collect();
+
+    // Важно: score хранится в игровом Field, его не перетираем.
+    // А вот role/ip/port должен отражать топологию и реальные адреса.
+    for p in &mut state.players.players {
+        if let Some(src) = by_id.get(&p.id) {
+            p.role = src.role;
+            if src.ip_address.is_some() {
+                p.ip_address = src.ip_address.clone();
+            }
+            if src.port.is_some() {
+                p.port = src.port;
+            }
+        }
+    }
+}
+
 impl NetworkService {
     pub fn new() -> Result<Self> {
         let net = UdpNetwork::new()?;
@@ -169,21 +188,64 @@ impl NetworkService {
 
                         if is_game_message {
                             use crate::game::state::GameMode;
-                            let is_master = {
+                            let (is_master, current_mode) = {
                                 let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
-                                matches!(
-                                    state_mgr.current_mode(),
+                                let mode = state_mgr.current_mode();
+                                let is_m = matches!(
+                                    mode,
                                     GameMode::InGame {
                                         role: NodeRole::Master,
                                         ..
                                     }
-                                )
+                                );
+                                (is_m, format!("{:?}", mode))
                             };
 
                             if !is_master {
                                 let master = current_master.lock().expect("master mutex poisoned");
+                                // Если мы не в игре — игнорируем всё.
                                 if master.is_none() {
+                                    println!("[FILTER] Dropping message: current_master is None, mode={}", current_mode);
                                     continue;
+                                }
+
+                                // После смены мастера старый мастер должен перестать слать,
+                                // а остальные — перестать принимать от старого мастера.
+                                //
+                                // Исключения (нужны для корректного switchover):
+                                // - RoleChange принимаем всегда (может указать нового мастера)
+                                // - State от нового мастера принимаем, если внутри state sender_id имеет роль MASTER
+                                //   (это позволит обновить current_master даже если он ещё указывает на старого).
+                                let current_master_addr = *master;
+                                drop(master);
+
+                                if let Some(cm) = current_master_addr {
+                                    let allow = match msg.r#type.as_ref() {
+                                        Some(game_message::Type::RoleChange(_)) => true,
+                                        Some(game_message::Type::State(state_msg)) => {
+                                            let sender_id = msg.sender_id.unwrap_or(0);
+                                            // Принимаем State от текущего мастера по адресу (обычный режим),
+                                            // либо при switchover — от нового мастера, если внутри State sender_id помечен MASTER.
+                                            // Иначе получим ситуацию: current_master уже указывает на deputy, но State от него
+                                            // будет отбрасываться из-за "старых" ролей в снапшоте.
+                                            addr == cm
+                                                || state_msg
+                                                    .state
+                                                    .players
+                                                    .players
+                                                    .iter()
+                                                    .any(|p| {
+                                                        p.id == sender_id
+                                                            && p.role == NodeRole::Master as i32
+                                                    })
+                                        }
+                                        _ => addr == cm,
+                                    };
+
+                                    if !allow {
+                                        println!("[FILTER] Dropping message from {}: not from current_master {:?}", addr, cm);
+                                        continue;
+                                    }
                                 }
                             }
                         }
@@ -192,6 +254,7 @@ impl NetworkService {
                         process_message(
                             &app_handle,
                             &discovered,
+                            &current_master,
                             &last_state,
                             &state_manager,
                             &players,
@@ -210,13 +273,42 @@ impl NetworkService {
                     }
                 }
 
-                // Периодически проверяем таймауты (каждые 200ms)
-                if last_timeout_check.elapsed() > Duration::from_millis(200) {
+                // Все интервалы таймеров привязываем к state_delay_ms.
+                let delay_ms = {
+                    let cfg_guard = game_config.lock().expect("game_config mutex poisoned");
+                    cfg_guard
+                        .as_ref()
+                        .and_then(|c| c.state_delay_ms)
+                        .map(|v| v.max(1) as u64)
+                        .unwrap_or(1000)
+                };
+
+                // Периодически проверяем таймауты (~0.2 * state_delay_ms)
+                let timeout_check_interval = Duration::from_millis(((delay_ms * 2) / 10).max(1));
+                if last_timeout_check.elapsed() > timeout_check_interval {
+                    let delay_ms_u32 = delay_ms.min(u32::MAX as u64) as u32;
+
                     let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
                     let mut players_guard = players.lock().expect("players mutex poisoned");
                     
-                    if let Err(e) = state_mgr.check_timeouts(1000, &*net, &mut players_guard) {
+                    if let Err(e) = state_mgr.check_timeouts(delay_ms_u32, &*net, &mut players_guard, &app_handle) {
                         eprintln!("Error checking timeouts: {}", e);
+                    }
+
+                    // Синхронизируем current_master с state machine, чтобы send_steer шёл на deputy
+                    // после фейловера (а не на старый current_master).
+                    {
+                        use crate::game::state::GameMode;
+                        let mut master_guard = current_master.lock().expect("master mutex poisoned");
+                        match state_mgr.current_mode() {
+                            GameMode::InGame { role: NodeRole::Master, .. } => {
+                                *master_guard = None;
+                            }
+                            GameMode::InGame { master_addr: Some(addr), .. } => {
+                                *master_guard = Some(addr);
+                            }
+                            _ => {}
+                        }
                     }
                     
                     drop(players_guard);
@@ -224,11 +316,14 @@ impl NetworkService {
                     last_timeout_check = Instant::now();
                 }
 
-                // Периодически отправляем пинги (каждые 300ms)
-                if last_ping_check.elapsed() > Duration::from_millis(300) {
+                // Периодически отправляем пинги (~0.2 * state_delay_ms, а сам интервал пинга — 0.5*delay в StateManager)
+                let ping_check_interval = Duration::from_millis(((delay_ms * 2) / 10).max(20));
+                if last_ping_check.elapsed() > ping_check_interval {
+                    let delay_ms_u32 = delay_ms.min(u32::MAX as u64) as u32;
+
                     let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
                     
-                    if let Err(e) = state_mgr.send_ping_if_needed(1000, &*net) {
+                    if let Err(e) = state_mgr.send_ping_if_needed(delay_ms_u32, &*net) {
                         eprintln!("Error sending pings: {}", e);
                     }
                     
@@ -236,8 +331,9 @@ impl NetworkService {
                     last_ping_check = Instant::now();
                 }
 
-                // Периодически отправляем announcements (каждую секунду для Master)
-                if last_announcement.elapsed() > Duration::from_secs(1) {
+                // Периодически отправляем announcements (завязываем на delay, но не слишком часто)
+                let announcement_interval = Duration::from_millis((delay_ms * 10).max(1000));
+                if last_announcement.elapsed() > announcement_interval {
                     use crate::game::state::GameMode;
                     
                     let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
@@ -366,7 +462,19 @@ impl NetworkService {
         // сбрасываем локальные кеши предыдущей сессии.
         self.reset_local_session()?;
 
-        let master_addr = self.find_master_addr(game_name)?;
+        // Берём мастер-адрес и конфиг из discovery (нужно для таймаутов 0.8*state_delay_ms)
+        let (master_addr, discovered_config, discovered_players) = {
+            let games = self.discovered.lock().expect("discovered mutex poisoned");
+            let found = games
+                .iter()
+                .find(|g| g.announcement.game_name == game_name)
+                .ok_or_else(|| anyhow!("master address for game '{game_name}' not found"))?;
+            (found.master_address, found.announcement.config, found.announcement.players.clone())
+        };
+
+        *self.game_name.lock().expect("game_name mutex poisoned") = game_name.to_string();
+        *self.game_config.lock().expect("game_config mutex poisoned") = Some(discovered_config);
+        *self.players.lock().expect("players mutex poisoned") = discovered_players;
 
         let join_msg = GameMessage {
             msg_seq: 0,
@@ -383,15 +491,49 @@ impl NetworkService {
         self.net.send_unicast(master_addr, join_msg)?;
         *self.current_master.lock().expect("master mutex poisoned") = Some(master_addr);
         self.net.set_role(requested_role);
+
+        // Включаем state machine в InGame, иначе таймауты/пинги/фейловер работают неправильно.
+        {
+            use crate::game::state::GameMode;
+            let deputy_id = self
+                .players
+                .lock()
+                .expect("players mutex poisoned")
+                .players
+                .iter()
+                .find(|p| p.role == NodeRole::Deputy as i32)
+                .map(|p| p.id);
+
+            let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+            state_mgr.transition(
+                GameMode::InGame {
+                    role: requested_role,
+                    master_addr: Some(master_addr),
+                    deputy_id,
+                },
+                &*self.net,
+            )?;
+        }
+
         Ok(())
     }
 
     pub fn send_steer(&self, direction: i32) -> Result<()> {
-        let master_addr = self
-            .current_master
-            .lock()
-            .expect("master mutex poisoned")
-            .ok_or_else(|| anyhow!("master address is not set"))?;
+        let master_addr = {
+            if let Some(addr) = *self.current_master.lock().expect("master mutex poisoned") {
+                addr
+            } else {
+                use crate::game::state::GameMode;
+                let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+                match state_mgr.current_mode() {
+                    GameMode::InGame { role: NodeRole::Master, .. } => {
+                        return Err(anyhow!("master cannot send steer"));
+                    }
+                    GameMode::InGame { master_addr: Some(addr), .. } => addr,
+                    _ => return Err(anyhow!("master address is not set")),
+                }
+            }
+        };
 
         let msg_seq = next_seq(&self.seq);
         let sender_id = self.my_player_id();
@@ -417,29 +559,29 @@ impl NetworkService {
             .lock()
             .expect("master mutex poisoned");
 
+        let master_id = self
+            .players
+            .lock()
+            .expect("players mutex poisoned")
+            .players
+            .iter()
+            .find(|p| p.role == NodeRole::Master as i32)
+            .map(|p| p.id);
+
         if let Some(master_addr) = master_addr {
-            // UDP ненадёжный: чтобы Master почти наверняка увидел disconnect,
-            // шлём RoleChange несколько раз.
-            let net = Arc::clone(&self.net);
-            let seq = Arc::clone(&self.seq);
             let sender_id = self.my_player_id();
 
-            std::thread::spawn(move || {
-                for _ in 0..3 {
-                    let msg_seq = next_seq(&seq);
-                    let msg = GameMessage {
-                        msg_seq,
-                        sender_id: Some(sender_id),
-                        receiver_id: Some(1),
-                        r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
-                            sender_role: Some(NodeRole::Viewer as i32),
-                            receiver_role: Some(NodeRole::Viewer as i32),
-                        })),
-                    };
-                    let _ = net.send_unicast(master_addr, msg);
-                    std::thread::sleep(Duration::from_millis(30));
-                }
-            });
+            let msg_seq = next_seq(&self.seq);
+            let msg = GameMessage {
+                msg_seq,
+                sender_id: Some(sender_id),
+                receiver_id: master_id,
+                r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                    sender_role: Some(NodeRole::Viewer as i32),
+                    receiver_role: Some(NodeRole::Viewer as i32),
+                })),
+            };
+            let _ = self.net.send_unicast(master_addr, msg);
         }
 
         // Локально сбрасываем состояние в Lobby: перестаём пинговать и обнуляем топологию.
@@ -476,17 +618,110 @@ impl NetworkService {
     }
 
     pub fn become_spectator(&self) -> Result<()> {
-        let master_addr = self
-            .current_master
-            .lock()
-            .expect("master mutex poisoned")
-            .ok_or_else(|| anyhow!("master address is not set"))?;
+        use crate::game::state::GameMode;
+
+        // Если мы сейчас MASTER и хотим стать VIEWER — делаем явный handoff на deputy.
+        // Иначе deputy/normal будут ждать таймаут 0.8*delay.
+        {
+            let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+            if let GameMode::InGame { role: NodeRole::Master, deputy_id, .. } = state_mgr.current_mode() {
+                drop(state_mgr);
+
+                let deputy_id = deputy_id.or_else(|| {
+                    self.players
+                        .lock()
+                        .expect("players mutex poisoned")
+                        .players
+                        .iter()
+                        .find(|p| p.role == NodeRole::Deputy as i32)
+                        .map(|p| p.id)
+                });
+
+                let Some(deputy_id) = deputy_id else {
+                    // Нет deputy (например, мы одни). Просто становимся VIEWER.
+                    let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+                    state_mgr.become_viewer(None, None, &*self.net)?;
+                    *self.current_master.lock().expect("master mutex poisoned") = None;
+                    return Ok(());
+                };
+
+                // Адрес deputy берём из state_manager known_players (или из players ip/port, если есть).
+                let deputy_addr = {
+                    let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+                    state_mgr
+                        .get_known_players()
+                        .into_iter()
+                        .find(|(id, _)| *id == deputy_id)
+                        .map(|(_, addr)| addr)
+                }
+                .or_else(|| {
+                    self.players
+                        .lock()
+                        .expect("players mutex poisoned")
+                        .players
+                        .iter()
+                        .find(|p| p.id == deputy_id)
+                        .and_then(|p| {
+                            let ip = p.ip_address.as_ref()?;
+                            let port = p.port?;
+                            format!("{}:{}", ip, port).parse::<SocketAddr>().ok()
+                        })
+                })
+                .ok_or_else(|| anyhow!("deputy address is not known"))?;
+
+                // Сообщаем deputy: "ты теперь MASTER" (receiver_role=MASTER).
+                // Важно: после того как мы перестали быть MASTER, мы не должны слать вообще ничего.
+                // Поэтому сообщение отправляем ДО переключения в VIEWER.
+                let sender_id = self.my_player_id();
+                let msg_seq = next_seq(&self.seq);
+                let msg = GameMessage {
+                    msg_seq,
+                    sender_id: Some(sender_id),
+                    receiver_id: Some(deputy_id),
+                    r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                        sender_role: Some(NodeRole::Master as i32),
+                        receiver_role: Some(NodeRole::Master as i32),
+                    })),
+                };
+                let _ = self.net.send_unicast(deputy_addr, msg);
+
+                // Локально становимся VIEWER и переключаем current_master на deputy.
+                {
+                    let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+                    state_mgr.become_viewer(Some(deputy_addr), Some(deputy_id), &*self.net)?;
+                }
+                *self.current_master.lock().expect("master mutex poisoned") = Some(deputy_addr);
+                return Ok(());
+            }
+        }
+
+        let master_addr = {
+            if let Some(addr) = *self.current_master.lock().expect("master mutex poisoned") {
+                addr
+            } else {
+                let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+                match state_mgr.current_mode() {
+                    GameMode::InGame { master_addr: Some(addr), .. } => addr,
+                    _ => return Err(anyhow!("master address is not set")),
+                }
+            }
+        };
 
         let msg_seq = next_seq(&self.seq);
+
+        let master_id = self
+            .players
+            .lock()
+            .expect("players mutex poisoned")
+            .players
+            .iter()
+            .find(|p| p.role == NodeRole::Master as i32)
+            .map(|p| p.id);
+
         let msg = GameMessage {
             msg_seq,
             sender_id: Some(self.my_player_id()),
-            receiver_id: Some(1),
+            receiver_id: master_id,
             r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
                 sender_role: Some(NodeRole::Viewer as i32),
                 receiver_role: None,
@@ -508,6 +743,24 @@ impl NetworkService {
             state_delay_ms: Some(1000),
         });
         state.as_ref().map(|s| game_state_to_dto(s, &config))
+    }
+
+    /// Последний сырой GameState, полученный от мастера (для восстановления симуляции на deputy).
+    pub fn latest_state_raw(&self) -> Option<GameState> {
+        self.last_state
+            .lock()
+            .expect("state mutex poisoned")
+            .as_ref()
+            .cloned()
+    }
+
+    /// Текущий GameConfig игры, сохранённый из announcement/join.
+    pub fn current_game_config_raw(&self) -> Option<GameConfig> {
+        self.game_config
+            .lock()
+            .expect("game_config mutex poisoned")
+            .as_ref()
+            .cloned()
     }
 
     pub fn init_as_master(&self, game_name: String, config: GameConfig, initial_player: GamePlayer) -> Result<()> {
@@ -539,23 +792,77 @@ impl NetworkService {
     /// Отправляет всем игрокам в known_players (включая зрителей VIEWER)
     /// Вышедшие игроки и игроки с timeout уже удалены из known_players
     pub fn broadcast_state(&self, state: &GameState) -> Result<()> {
+        use crate::game::state::GameMode;
+
+        // Жёсткое правило: если узел перестал быть MASTER — он не должен слать вообще ничего.
+        // (в т.ч. если ещё работает локальный GameManager loop)
+        {
+            let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+            let is_master = matches!(
+                state_mgr.current_mode(),
+                GameMode::InGame {
+                    role: NodeRole::Master,
+                    ..
+                }
+            );
+            if !is_master {
+                return Ok(());
+            }
+        }
+
         let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
         let known_players = state_mgr.get_known_players();
         drop(state_mgr);
 
+        // Debug: показываем куда будем слать
+        static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let cnt = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cnt < 3 {
+            println!("[broadcast_state] known_players count={}, ids: {:?}", 
+                known_players.len(), 
+                known_players.iter().map(|(id, addr)| (*id, addr.to_string())).collect::<Vec<_>>());
+        }
+
+        // Важно: роли (в т.ч. DEPUTY) определяются сетевым state_manager/players,
+        // а не игровым Field. Поэтому перед рассылкой накладываем meta (role/ip/port) на State.
+        let mut state_to_send = state.clone();
+        let players_snapshot = self.players.lock().expect("players mutex poisoned").clone();
+        overlay_player_meta_from_players(&mut state_to_send, &players_snapshot);
+
+        // У мастера собственный ip/port в players может быть None (он сам себе сообщений не шлёт).
+        // Но это критично для takeover: deputy должен знать адрес старого мастера и адреса всех узлов.
+        if let Ok(local_addr) = self.net.get_local_addr() {
+            let ip = if local_addr.ip().is_unspecified() {
+                "127.0.0.1".to_string()
+            } else {
+                local_addr.ip().to_string()
+            };
+            for p in &mut state_to_send.players.players {
+                if p.role == NodeRole::Master as i32 {
+                    if p.ip_address.is_none() {
+                        p.ip_address = Some(ip.clone());
+                    }
+                    if p.port.is_none() {
+                        p.port = Some(local_addr.port() as i32);
+                    }
+                }
+            }
+        }
+
         let msg_seq = next_seq(&self.seq);
         let msg = GameMessage {
             msg_seq,
-            sender_id: Some(1), // Master ID
+            sender_id: Some(self.my_player_id()),
             receiver_id: None,
             r#type: Some(game_message::Type::State(game_message::StateMsg {
-                state: state.clone(),
+                state: state_to_send,
             })),
         };
 
         // Отправляем всем игрокам в known_players (вышедшие уже удалены)
+        let my_id = self.my_player_id();
         for (player_id, addr) in known_players {
-            if player_id != 1 { // Не отправляем себе
+            if player_id != my_id {
                 if let Err(e) = self.net.send_unicast(addr, msg.clone()) {
                     eprintln!("Failed to send state to player {}: {}", player_id, e);
                 }
@@ -638,6 +945,7 @@ impl NetworkService {
 fn process_message(
     app: &AppHandle,
     discovered: &Arc<Mutex<Vec<DiscoveredGame>>>,
+    current_master: &Arc<Mutex<Option<SocketAddr>>>,
     last_state: &Arc<Mutex<Option<GameState>>>,
     state_manager: &Arc<Mutex<Box<dyn StateManager>>>,
     players: &Arc<Mutex<GamePlayers>>,
@@ -736,11 +1044,67 @@ fn process_message(
 
         let payload = game_state_to_dto(&state_msg.state, &config);
         let _ = app.emit("game-state", payload);
+
+        // Если мы не MASTER, то адрес отправителя State считаем текущим мастером,
+        // но только если этот State действительно пришёл от MASTER.
+        // Это помогает NORMAL быстро переключаться на deputy после takeover.
+        {
+            use crate::game::state::GameMode;
+            let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+            let is_master = matches!(state_mgr.current_mode(), GameMode::InGame { role: NodeRole::Master, .. });
+            let is_viewer = matches!(state_mgr.current_mode(), GameMode::InGame { role: NodeRole::Viewer, .. } | GameMode::Viewer);
+            let my_id = state_mgr.my_id();
+            drop(state_mgr);
+            
+            if !is_master {
+                let sender_id = msg.sender_id.unwrap_or(0);
+                let is_state_from_master = state_msg
+                    .state
+                    .players
+                    .players
+                    .iter()
+                    .any(|p| p.id == sender_id && p.role == NodeRole::Master as i32);
+
+                if is_state_from_master {
+                    *current_master.lock().expect("master mutex poisoned") = Some(addr);
+                }
+                
+                // Если мы не viewer и нашей змейки больше нет в State - становимся viewer
+                if !is_viewer && my_id != 0 {
+                    let my_snake_alive = state_msg.state.snakes.iter().any(|s| s.player_id == my_id);
+                    if !my_snake_alive {
+                        println!("[State] My snake (id={}) died, becoming viewer", my_id);
+                        
+                        // Отправляем RoleChange мастеру
+                        let role_change = GameMessage {
+                            msg_seq: 0, // будет заменён
+                            sender_id: Some(my_id),
+                            receiver_id: Some(sender_id),
+                            r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                                sender_role: Some(NodeRole::Viewer as i32),
+                                receiver_role: None, // просто становимся viewer, не выходим
+                            })),
+                        };
+                        let _ = net.send_unicast(addr, role_change);
+                        
+                        // Переключаемся в режим viewer
+                        let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+                        let _ = state_mgr.become_viewer(Some(addr), None, &**net);
+                    }
+                }
+            }
+        }
     }
 
-    // Все остальные сообщения обрабатываем через StateManager
+    // Все сообщения (в т.ч. State) обрабатываем через StateManager, чтобы:
+    // - обновлять last_seen (таймаут мастера зависит от этого)
+    // - слать ACK на State
     let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
     let mut players_guard = players.lock().expect("players mutex poisoned");
+
+    // Подмешиваем адреса игроков из players (которые приходят в State) в known_players.
+    // Это критично для deputy takeover: иначе deputy не знает куда слать State.
+    state_mgr.observe_players(&players_guard);
     
     if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard, app) {
         eprintln!("Error handling message: {}", e);

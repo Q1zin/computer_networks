@@ -127,8 +127,11 @@ pub fn leave_game(
 }
 
 #[tauri::command]
-pub fn become_spectator(network: State<NetworkService>) -> Result<(), String> {
+pub fn become_spectator(network: State<NetworkService>, game_manager: State<GameManager>) -> Result<(), String> {
     println!("Becoming spectator");
+    // Если мы были MASTER, нужно остановить локальную симуляцию/loop немедленно.
+    // Даже если network-layer уже перестанет слать пакеты, GameManager не должен продолжать тикать.
+    game_manager.reset();
     network.become_spectator().map_err(|e| e.to_string())
 }
 
