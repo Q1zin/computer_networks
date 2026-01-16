@@ -357,9 +357,10 @@ impl NetworkService {
             .ok_or_else(|| anyhow!("master address is not set"))?;
 
         let msg_seq = next_seq(&self.seq);
+        let sender_id = self.my_player_id();
         let msg = GameMessage {
             msg_seq,
-            sender_id: None,
+            sender_id: Some(sender_id),
             receiver_id: None,
             r#type: Some(game_message::Type::Steer(game_message::SteerMsg { direction })),
         };
@@ -650,15 +651,18 @@ fn process_message(
             // Находим игрока по имени в текущем списке игроков
             for player in &players_guard.players {
                 if player.name == join_msg.player_name {
-                    #[derive(Clone, serde::Serialize)]
-                    struct JoinEvent {
-                        player_name: String,
-                        player_id: i32,
+                    // Эмитим событие только для игроков (не для зрителей)
+                    if player.role != NodeRole::Viewer as i32 {
+                        #[derive(Clone, serde::Serialize)]
+                        struct JoinEvent {
+                            player_name: String,
+                            player_id: i32,
+                        }
+                        let _ = app.emit("player-joined", JoinEvent {
+                            player_name: player.name.clone(),
+                            player_id: player.id,
+                        });
                     }
-                    let _ = app.emit("player-joined", JoinEvent {
-                        player_name: player.name.clone(),
-                        player_id: player.id,
-                    });
                     break;
                 }
             }
