@@ -1,8 +1,7 @@
 use crate::game::GameManager;
 use crate::network::{GameStateDto, NetworkService};
 use crate::snakes::{GameConfig, GamePlayer, NodeRole, PlayerType};
-use serde::{Deserialize, Serialize};
-use tauri::{State, Listener};
+use tauri::State;
 
 #[tauri::command]
 pub fn create_new_game(

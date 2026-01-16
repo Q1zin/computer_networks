@@ -61,6 +61,7 @@ impl GameManager {
     }
 
     /// Добавление нового игрока в игру (для Master)
+    #[allow(dead_code)]
     pub fn add_player(&self, player_name: String) -> Result<i32> {
         let mut field_guard = self.field.lock().unwrap();
         let field = field_guard.as_mut().ok_or_else(|| anyhow!("Game not initialized"))?;
@@ -75,6 +76,7 @@ impl GameManager {
     }
 
     /// Обновление состояния игры (только для Master)
+    #[allow(dead_code)]
     pub fn tick(&self, delay_ms: u32) -> Result<Option<GameState>> {
         let mut last_tick = self.last_tick.lock().unwrap();
         let elapsed = last_tick.elapsed();
@@ -102,6 +104,7 @@ impl GameManager {
     }
 
     /// Установка ID текущего игрока
+    #[allow(dead_code)]
     pub fn set_my_player_id(&self, id: i32) {
         *self.my_player_id.lock().unwrap() = Some(id);
     }
@@ -112,6 +115,7 @@ impl GameManager {
     }
 
     /// Проверка, что игра полная
+    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         let field_guard = self.field.lock().unwrap();
         field_guard.as_ref().map(|f| f.is_full()).unwrap_or(false)
@@ -126,6 +130,7 @@ impl GameManager {
     }
 
     /// Обработка смерти змейки
+    #[allow(dead_code)]
     pub fn handle_death(&self, snake_id: i32) {
         let mut field_guard = self.field.lock().unwrap();
         if let Some(field) = field_guard.as_mut() {
@@ -144,6 +149,7 @@ impl GameManager {
     }
 
     /// Запуск игрового цикла (только для Master)
+    #[allow(dead_code)]
     pub fn start_game_loop(&self, app: AppHandle) {
         if self.running.swap(true, Ordering::SeqCst) {
             println!("Game loop already running");
@@ -227,7 +233,7 @@ impl GameManager {
         std::thread::spawn(move || {
             println!("[game-loop-net] Thread started");
             let mut tick_count = 0u32;
-            let mut master_snake_dead = false;
+            // Флаг больше не нужен: при смерти змейки мастера мы сразу выходим из цикла.
             
             while running.load(Ordering::SeqCst) {
                 let delay_ms = {
@@ -292,10 +298,9 @@ impl GameManager {
                                 // Проверяем, умерла ли змейка master'а
                                 let my_snake_alive = new_state.snakes.iter().any(|s| s.player_id == my_id);
                                 
-                                if !my_snake_alive && !master_snake_dead && my_id != 0 {
+                                if !my_snake_alive && my_id != 0 {
                                     // Змейка master'а умерла - нужно стать viewer и передать роль deputy
                                     println!("[game-loop-net] Master's snake died! Becoming spectator...");
-                                    master_snake_dead = true;
                                     
                                     // Останавливаем game loop - мы больше не master
                                     running.store(false, Ordering::SeqCst);
@@ -381,7 +386,6 @@ impl GameManager {
             #[derive(serde::Deserialize)]
             struct JoinEvent {
                 player_name: String,
-                player_id: i32,
             }
             
             if let Ok(join_event) = serde_json::from_str::<JoinEvent>(event.payload()) {

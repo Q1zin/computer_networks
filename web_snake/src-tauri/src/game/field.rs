@@ -56,8 +56,8 @@ impl FieldImpl {
         let head_y = proto.points[0].y.unwrap_or(0).rem_euclid(h);
         let head = Pos { x: head_x, y: head_y };
 
-        let head_direction = Direction::from_i32(proto.head_direction).unwrap_or(Direction::Up);
-        let state = SnakeState::from_i32(proto.state).unwrap_or(SnakeState::Alive);
+        let head_direction = Direction::try_from(proto.head_direction).unwrap_or(Direction::Up);
+        let state = SnakeState::try_from(proto.state).unwrap_or(SnakeState::Alive);
 
         let mut body: Vec<Pos> = Vec::new();
         body.push(head);
@@ -112,9 +112,11 @@ pub trait GameField: Send + Sync {
     fn get_current_state(&self) -> GameState;
     fn is_full(&self) -> bool;
     fn spawn_food(&mut self);
+    #[allow(dead_code)]
     fn handle_death(&mut self, snake_id: i32);
     fn change_snake_to_zombie(&mut self, player_id: i32);
     fn remove_player(&mut self, player_id: i32);
+    #[allow(dead_code)]
     fn config(&self) -> &GameConfig;
 }
 

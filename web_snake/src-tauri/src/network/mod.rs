@@ -412,7 +412,7 @@ impl NetworkService {
                                 // Отправляем announcement
                                 let local_addr = net.get_local_addr().ok();
                                 if let Some(addr) = local_addr {
-                                    let mut players_guard = players.lock().expect("players mutex poisoned");
+                                    let players_guard = players.lock().expect("players mutex poisoned");
                                     let mut players_clone = players_guard.clone();
                                     
                                     // Заполняем IP и порт для Master
@@ -526,6 +526,7 @@ impl NetworkService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn list_games(&self) -> Vec<DiscoveredGameDto> {
         let games = self.discovered.lock().expect("discovered mutex poisoned");
         games
@@ -1011,6 +1012,7 @@ impl NetworkService {
         state_mgr.my_id()
     }
 
+    #[allow(dead_code)]
     pub fn send_announcement(&self, game_name: String, config: &GameConfig, is_full: bool) -> Result<()> {
         use crate::snakes::{GameAnnouncement, game_message::AnnouncementMsg};
         
@@ -1066,10 +1068,12 @@ impl NetworkService {
     }
 
     /// Получить текущее состояние заполненности поля
+    #[allow(dead_code)]
     pub fn get_is_full(&self) -> bool {
         self.is_full.load(Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     fn find_master_addr(&self, game_name: &str) -> Result<SocketAddr> {
         let games = self.discovered.lock().expect("discovered mutex poisoned");
         let found = games

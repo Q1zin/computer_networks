@@ -316,7 +316,7 @@ impl StateManager for StateImpl {
                     };
                     net.send_unicast(sender, error_msg)?;
                     self.last_send_times.insert(sender, Instant::now());
-                    ack_already_sent = true; // Не отправляем Ack после ErrorMsg
+                    // Ack не отправляем после ErrorMsg
                     return Ok(());
                 }
                 
@@ -454,14 +454,7 @@ impl StateManager for StateImpl {
                 }
             }
 
-            (
-                GameMode::InGame {
-                    role,
-                    master_addr: _,
-                    deputy_id,
-                },
-                Some(game_message::Type::RoleChange(rc)),
-            ) => {
+            (GameMode::InGame { .. }, Some(game_message::Type::RoleChange(rc))) => {
                 // RoleChange от мастера используется для:
                 // - назначения DEPUTY (receiver_role=DEPUTY)
                 // - оповещения о смене мастера (sender_role=MASTER)
@@ -954,7 +947,6 @@ impl StateManager for StateImpl {
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         }
