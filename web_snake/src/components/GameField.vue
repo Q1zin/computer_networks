@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import type { GameState, GameConfig, Snake, Coord } from "../types/game";
 
 interface Props {
@@ -137,13 +137,43 @@ function darkenColor(color: string): string {
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
-onMounted(() => {
-  if (canvas.value) {
-    canvas.value.width = 800;
-    canvas.value.height = 600;
+function resizeCanvas() {
+  if (!canvas.value) return;
+  
+  const container = canvas.value.parentElement;
+  if (!container) return;
+  
+  const containerWidth = container.clientWidth - 32; // padding
+  const containerHeight = container.clientHeight - 32;
+  
+  const aspectRatio = props.config.width / props.config.height;
+  
+  let width = containerWidth;
+  let height = containerWidth / aspectRatio;
+  
+  if (height > containerHeight) {
+    height = containerHeight;
+    width = containerHeight * aspectRatio;
   }
+  
+  canvas.value.width = width;
+  canvas.value.height = height;
+  
   drawGame();
+}
+
+onMounted(() => {
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
 });
+
+onUnmounted(() => {
+  window.removeEventListener('resize', resizeCanvas);
+});
+
+watch(() => props.config, () => {
+  resizeCanvas();
+}, { deep: true });
 
 defineExpose({ drawGame });
 </script>
@@ -163,11 +193,14 @@ defineExpose({ drawGame });
   display: flex;
   justify-content: center;
   align-items: center;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
 }
 
 canvas {
-  max-width: 100%;
-  max-height: 100%;
   image-rendering: pixelated;
+  display: block;
 }
 </style>

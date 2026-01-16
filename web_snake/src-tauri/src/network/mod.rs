@@ -82,11 +82,21 @@ pub struct GamePlayersDto {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GameConfigDto {
+    pub width: i32,
+    pub height: i32,
+    pub food_static: i32,
+    pub state_delay_ms: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GameStateDto {
     pub state_order: i32,
     pub snakes: Vec<SnakeDto>,
     pub foods: Vec<CoordDto>,
     pub players: GamePlayersDto,
+    pub config: GameConfigDto,
 }
 
 #[derive(Clone)]
@@ -152,6 +162,7 @@ impl NetworkService {
                             &last_state,
                             &state_manager,
                             &players,
+                            &game_config,
                             &net,
                             msg,
                             addr,
@@ -387,7 +398,14 @@ impl NetworkService {
 
     pub fn latest_state(&self) -> Option<GameStateDto> {
         let state = self.last_state.lock().expect("state mutex poisoned");
-        state.as_ref().map(game_state_to_dto)
+        let config_guard = self.game_config.lock().expect("game_config mutex poisoned");
+        let config = config_guard.as_ref().cloned().unwrap_or(GameConfig {
+            width: Some(40),
+            height: Some(30),
+            food_static: Some(1),
+            state_delay_ms: Some(1000),
+        });
+        state.as_ref().map(|s| game_state_to_dto(s, &config))
     }
 
     pub fn init_as_master(&self, game_name: String, config: GameConfig, initial_player: GamePlayer) -> Result<()> {
@@ -491,6 +509,7 @@ fn process_message(
     last_state: &Arc<Mutex<Option<GameState>>>,
     state_manager: &Arc<Mutex<Box<dyn StateManager>>>,
     players: &Arc<Mutex<GamePlayers>>,
+    game_config: &Arc<Mutex<Option<GameConfig>>>,
     net: &Arc<UdpNetwork>,
     msg: GameMessage,
     addr: SocketAddr,
@@ -573,7 +592,17 @@ fn process_message(
         drop(players_guard);
         drop(state_guard);
 
-        let payload = game_state_to_dto(&state_msg.state);
+        // Получаем config для передачи в DTO
+        let config_guard = game_config.lock().expect("game_config mutex poisoned");
+        let config = config_guard.as_ref().cloned().unwrap_or(GameConfig {
+            width: Some(40),
+            height: Some(30),
+            food_static: Some(1),
+            state_delay_ms: Some(1000),
+        });
+        drop(config_guard);
+
+        let payload = game_state_to_dto(&state_msg.state, &config);
         let _ = app.emit("game-state", payload);
     }
 
@@ -641,7 +670,7 @@ fn process_message(
     drop(state_mgr);
 }
 
-pub fn game_state_to_dto(state: &GameState) -> GameStateDto {
+pub fn game_state_to_dto(state: &GameState, config: &GameConfig) -> GameStateDto {
     GameStateDto {
         state_order: state.state_order,
         snakes: state
@@ -676,6 +705,12 @@ pub fn game_state_to_dto(state: &GameState) -> GameStateDto {
                 .iter()
                 .map(game_player_to_dto)
                 .collect(),
+        },
+        config: GameConfigDto {
+            width: config.width.unwrap_or(40),
+            height: config.height.unwrap_or(30),
+            food_static: config.food_static.unwrap_or(1),
+            state_delay_ms: config.state_delay_ms.unwrap_or(1000),
         },
     }
 }

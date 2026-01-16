@@ -156,8 +156,18 @@ impl GameManager {
 
                         match fld.update(steers) {
                             Ok(new_state) => {
+                                // Получаем config для передачи в DTO
+                                let cfg_guard = config.lock().unwrap();
+                                let game_config = cfg_guard.as_ref().cloned().unwrap_or(GameConfig {
+                                    width: Some(40),
+                                    height: Some(30),
+                                    food_static: Some(1),
+                                    state_delay_ms: Some(1000),
+                                });
+                                drop(cfg_guard);
+                                
                                 // Отправляем State через event используя DTO
-                                let state_dto = game_state_to_dto(&new_state);
+                                let state_dto = game_state_to_dto(&new_state, &game_config);
                                 let _ = app_clone.emit("game-state", state_dto);
                             }
                             Err(e) => {

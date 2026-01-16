@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import GameField from "./GameField.vue";
 import PlayersList from "./PlayersList.vue";
-import type { GameState, GameConfig } from "../types/game";
+import type { GameState } from "../types/game";
 import { Direction } from "../types/game";
 
 const emit = defineEmits<{
@@ -12,56 +12,18 @@ const emit = defineEmits<{
 }>();
 
 const gameState = ref<GameState>({
-  stateOrder: 1,
-  snakes: [
-    {
-      playerId: 0,
-      points: [
-        { x: 10, y: 10 },
-        { x: 3, y: 0 },
-        { x: 0, y: 2 },
-      ],
-      state: 0,
-      headDirection: Direction.RIGHT,
-    },
-    {
-      playerId: 1,
-      points: [
-        { x: 20, y: 15 },
-        { x: -4, y: 0 },
-      ],
-      state: 0,
-      headDirection: Direction.LEFT,
-    },
-    {
-      playerId: 2,
-      points: [
-        { x: 15, y: 5 },
-        { x: 0, y: 3 },
-      ],
-      state: 1,
-      headDirection: Direction.DOWN,
-    },
-  ],
-  foods: [
-    { x: 5, y: 5 },
-    { x: 25, y: 20 },
-    { x: 30, y: 10 },
-  ],
+  stateOrder: 0,
+  snakes: [],
+  foods: [],
   players: {
-    players: [
-      { name: "Игрок 1", id: 0, role: 1, type: 0, score: 150 },
-      { name: "Игрок 2", id: 1, role: 0, type: 0, score: 120 },
-      { name: "Игрок 3", id: 2, role: 3, type: 0, score: 80 },
-    ],
+    players: [],
   },
-});
-
-const config = ref<GameConfig>({
-  width: 40,
-  height: 30,
-  foodStatic: 3,
-  stateDelayMs: 1000,
+  config: {
+    width: 40,
+    height: 30,
+    foodStatic: 1,
+    stateDelayMs: 1000,
+  },
 });
 
 const currentPlayerId = ref<number>(0);
@@ -129,68 +91,14 @@ async function becomeSpectator() {
 
 let unlistenGameState: (() => void) | null = null;
 
-
-function startMockEvents() {
-  let stateOrder = 1;
-  const mockInterval = setInterval(() => {
-    stateOrder++;
-    
-    gameState.value = {
-      ...gameState.value,
-      stateOrder,
-      snakes: gameState.value.snakes.map((snake) => {
-        const head = snake.points[0];
-        let newX = head.x;
-        let newY = head.y;
-        
-        switch (snake.headDirection) {
-          case Direction.UP:
-            newY = (newY - 1 + config.value.height) % config.value.height;
-            break;
-          case Direction.DOWN:
-            newY = (newY + 1) % config.value.height;
-            break;
-          case Direction.LEFT:
-            newX = (newX - 1 + config.value.width) % config.value.width;
-            break;
-          case Direction.RIGHT:
-            newX = (newX + 1) % config.value.width;
-            break;
-        }
-        
-        return {
-          ...snake,
-          points: [
-            { x: newX, y: newY },
-            ...snake.points.slice(1),
-          ],
-        };
-      }),
-      players: {
-        players: gameState.value.players.players.map(p => ({
-          ...p,
-          score: p.score + Math.floor(Math.random() * 5),
-        })),
-      },
-    };
-    
-    gameFieldRef.value?.drawGame();
-  }, config.value.stateDelayMs);
-  
-  return () => clearInterval(mockInterval);
-}
-
-let stopMockEvents: (() => void) | null = null;
-
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyPress);
   
   unlistenGameState = await listen<GameState>("game-state", (event) => {
+    console.log("Received game state:", event.payload);
     gameState.value = event.payload;
     gameFieldRef.value?.drawGame();
   });
-  
-  stopMockEvents = startMockEvents();
   
   gameFieldRef.value?.drawGame();
 });
@@ -200,10 +108,6 @@ onUnmounted(() => {
   
   if (unlistenGameState) {
     unlistenGameState();
-  }
-  
-  if (stopMockEvents) {
-    stopMockEvents();
   }
 });
 
@@ -231,7 +135,7 @@ watch(gameState, () => {
         <GameField 
           ref="gameFieldRef"
           :game-state="gameState" 
-          :config="config" 
+          :config="gameState.config" 
         />
         <!-- <div class="game-hint">
           Управление: стрелки или WASD
@@ -248,11 +152,11 @@ watch(gameState, () => {
           <h3>Статистика</h3>
           <div class="stat-item">
             <span class="stat-label">Размер поля:</span>
-            <span class="stat-value">{{ config.width }}×{{ config.height }}</span>
+            <span class="stat-value">{{ gameState.config.width }}×{{ gameState.config.height }}</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">Задержка:</span>
-            <span class="stat-value">{{ config.stateDelayMs }}мс</span>
+            <span class="stat-value">{{ gameState.config.stateDelayMs }}мс</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">Ход:</span>
@@ -332,9 +236,11 @@ h2 {
 
 .game-main {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: hidden;
 }
 
 .game-hint {
@@ -345,6 +251,7 @@ h2 {
 
 .game-sidebar {
   width: 300px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 20px;

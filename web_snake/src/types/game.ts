@@ -60,4 +60,5 @@ export interface GameState {
   snakes: Snake[];
   foods: Coord[];
   players: GamePlayers;
+  config: GameConfig;
 }
