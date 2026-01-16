@@ -1,15 +1,22 @@
 use crate::game::field::{FieldImpl, GameField};
+use crate::network::game_state_to_dto;
 use crate::snakes::{Direction, GameConfig, GamePlayers, GameState, GamePlayer};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
 pub struct GameManager {
     field: Arc<Mutex<Option<FieldImpl>>>,
     pending_steers: Arc<Mutex<HashMap<i32, Direction>>>,
     my_player_id: Arc<Mutex<Option<i32>>>,
     last_tick: Arc<Mutex<Instant>>,
+    running: Arc<AtomicBool>,
+    config: Arc<Mutex<Option<GameConfig>>>,
 }
 
 impl GameManager {
@@ -19,6 +26,8 @@ impl GameManager {
             pending_steers: Arc::new(Mutex::new(HashMap::new())),
             my_player_id: Arc::new(Mutex::new(None)),
             last_tick: Arc::new(Mutex::new(Instant::now())),
+            running: Arc::new(AtomicBool::new(false)),
+            config: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -28,8 +37,9 @@ impl GameManager {
             players: vec![host_player],
         };
         
-        let field = FieldImpl::new(config, players);
+        let field = FieldImpl::new(config.clone(), players);
         *self.field.lock().unwrap() = Some(field);
+        *self.config.lock().unwrap() = Some(config);
         Ok(())
     }
 
@@ -100,9 +110,66 @@ impl GameManager {
 
     /// Сброс игры
     pub fn reset(&self) {
+        self.running.store(false, Ordering::SeqCst);
         *self.field.lock().unwrap() = None;
         self.pending_steers.lock().unwrap().clear();
         *self.my_player_id.lock().unwrap() = None;
         *self.last_tick.lock().unwrap() = Instant::now();
+        *self.config.lock().unwrap() = None;
+    }
+
+    /// Запуск игрового цикла (только для Master)
+    pub fn start_game_loop(&self, app: AppHandle) {
+        if self.running.swap(true, Ordering::SeqCst) {
+            println!("Game loop already running");
+            return;
+        }
+
+        let field = Arc::clone(&self.field);
+        let pending_steers = Arc::clone(&self.pending_steers);
+        let last_tick = Arc::clone(&self.last_tick);
+        let running = Arc::clone(&self.running);
+        let config = Arc::clone(&self.config);
+
+        std::thread::spawn(move || {
+            while running.load(Ordering::SeqCst) {
+                let delay_ms = {
+                    let cfg_guard = config.lock().unwrap();
+                    cfg_guard
+                        .as_ref()
+                        .and_then(|c| c.state_delay_ms)
+                        .unwrap_or(500)
+                };
+
+                let should_update = {
+                    let last_tick_guard = last_tick.lock().unwrap();
+                    last_tick_guard.elapsed() >= Duration::from_millis(delay_ms as u64)
+                };
+
+                if should_update {
+                    let mut field_guard = field.lock().unwrap();
+                    if let Some(fld) = field_guard.as_mut() {
+                        let mut steers_guard = pending_steers.lock().unwrap();
+                        let steers = std::mem::take(&mut *steers_guard);
+                        drop(steers_guard);
+
+                        match fld.update(steers) {
+                            Ok(new_state) => {
+                                // Отправляем State через event используя DTO
+                                let state_dto = game_state_to_dto(&new_state);
+                                let _ = app.emit("game-state", state_dto);
+                            }
+                            Err(e) => {
+                                eprintln!("Game update error: {}", e);
+                            }
+                        }
+
+                        *last_tick.lock().unwrap() = Instant::now();
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
     }
 }

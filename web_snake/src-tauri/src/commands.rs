@@ -19,7 +19,9 @@ pub fn create_new_game(
     width: u32,
     height: u32,
     frequency: u32,
+    app: tauri::AppHandle,
     game_manager: State<GameManager>,
+    network: State<NetworkService>,
 ) -> Result<String, String> {
     println!(
         "Creating game: {} ({}x{}), frequency: {}ms",
@@ -43,9 +45,18 @@ pub fn create_new_game(
         score: 0,
     };
 
+    // Создаем игру в GameManager
     game_manager
-        .create_game(config, host_player)
+        .create_game(config, host_player.clone())
         .map_err(|e| e.to_string())?;
+
+    // Инициализируем NetworkService как Master
+    network
+        .init_as_master(host_player)
+        .map_err(|e| e.to_string())?;
+
+    // Запускаем игровой цикл
+    game_manager.start_game_loop(app);
 
     Ok(format!("Game '{}' created successfully", name))
 }

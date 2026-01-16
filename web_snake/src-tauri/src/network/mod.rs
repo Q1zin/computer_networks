@@ -2,9 +2,10 @@ pub mod protocol;
 pub mod udp_impl;
 
 use tauri::Emitter;
+use crate::game::state::{StateImpl, StateManager};
 use crate::snakes::{
     game_message, game_message::RoleChangeMsg, GameAnnouncement, GameMessage, GamePlayer,
-    GameState, NodeRole, PlayerType,
+    GamePlayers, GameState, NodeRole, PlayerType,
 };
 use anyhow::{anyhow, Result};
 use protocol::NetworkProtocol;
@@ -92,6 +93,8 @@ pub struct NetworkService {
     discovered: Arc<Mutex<Vec<DiscoveredGame>>>,
     current_master: Arc<Mutex<Option<SocketAddr>>>,
     last_state: Arc<Mutex<Option<GameState>>>,
+    state_manager: Arc<Mutex<Box<dyn StateManager>>>,
+    players: Arc<Mutex<GamePlayers>>,
     running: Arc<AtomicBool>,
     seq: Arc<Mutex<i64>>,
 }
@@ -104,6 +107,8 @@ impl NetworkService {
             discovered: Arc::new(Mutex::new(Vec::new())),
             current_master: Arc::new(Mutex::new(None)),
             last_state: Arc::new(Mutex::new(None)),
+            state_manager: Arc::new(Mutex::new(Box::new(StateImpl::new()))),
+            players: Arc::new(Mutex::new(GamePlayers { players: vec![] })),
             running: Arc::new(AtomicBool::new(false)),
             seq: Arc::new(Mutex::new(0)),
         })
@@ -118,15 +123,29 @@ impl NetworkService {
         let net = Arc::clone(&self.net);
         let discovered = Arc::clone(&self.discovered);
         let last_state = Arc::clone(&self.last_state);
+        let state_manager = Arc::clone(&self.state_manager);
+        let players = Arc::clone(&self.players);
         let running = Arc::clone(&self.running);
         let app_handle = app.clone();
 
         std::thread::spawn(move || {
+            let mut last_timeout_check = Instant::now();
+            let mut last_ping_check = Instant::now();
+            
             while running.load(Ordering::SeqCst) {
                 match net.poll_receive() {
                     Ok(Some((msg, addr))) => {
                         println!("Received message from {}: {:?}", addr, msg);
-                        process_message(&app_handle, &discovered, &last_state, msg, addr);
+                        process_message(
+                            &app_handle,
+                            &discovered,
+                            &last_state,
+                            &state_manager,
+                            &players,
+                            &net,
+                            msg,
+                            addr,
+                        );
                     }
                     Ok(None) => {
                         // std::thread::sleep(Duration::from_millis(5));
@@ -135,6 +154,32 @@ impl NetworkService {
                         eprintln!("Network receive error: {err:#}");
                         // std::thread::sleep(Duration::from_millis(50));
                     }
+                }
+
+                // Периодически проверяем таймауты (каждые 200ms)
+                if last_timeout_check.elapsed() > Duration::from_millis(200) {
+                    let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+                    let mut players_guard = players.lock().expect("players mutex poisoned");
+                    
+                    if let Err(e) = state_mgr.check_timeouts(1000, &*net, &mut players_guard) {
+                        eprintln!("Error checking timeouts: {}", e);
+                    }
+                    
+                    drop(players_guard);
+                    drop(state_mgr);
+                    last_timeout_check = Instant::now();
+                }
+
+                // Периодически отправляем пинги (каждые 300ms)
+                if last_ping_check.elapsed() > Duration::from_millis(300) {
+                    let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+                    
+                    if let Err(e) = state_mgr.send_ping_if_needed(1000, &*net) {
+                        eprintln!("Error sending pings: {}", e);
+                    }
+                    
+                    drop(state_mgr);
+                    last_ping_check = Instant::now();
                 }
             }
         });
@@ -246,6 +291,38 @@ impl NetworkService {
         state.as_ref().map(game_state_to_dto)
     }
 
+    pub fn init_as_master(&self, initial_player: GamePlayer) -> Result<()> {
+        use crate::game::state::GameMode;
+        
+        let mut players_guard = self.players.lock().expect("players mutex poisoned");
+        players_guard.players = vec![initial_player];
+        drop(players_guard);
+
+        let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+        state_mgr.transition(
+            GameMode::InGame {
+                role: NodeRole::Master,
+                master_addr: None,
+                deputy_id: None,
+            },
+            &*self.net,
+        )?;
+        drop(state_mgr);
+
+        self.net.set_role(NodeRole::Master);
+        Ok(())
+    }
+
+    pub fn get_players(&self) -> GamePlayers {
+        let players_guard = self.players.lock().expect("players mutex poisoned");
+        players_guard.clone()
+    }
+
+    pub fn my_player_id(&self) -> i32 {
+        let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+        state_mgr.my_id()
+    }
+
     fn find_master_addr(&self, game_name: &str) -> Result<SocketAddr> {
         let games = self.discovered.lock().expect("discovered mutex poisoned");
         let found = games
@@ -261,11 +338,15 @@ fn process_message(
     app: &AppHandle,
     discovered: &Arc<Mutex<Vec<DiscoveredGame>>>,
     last_state: &Arc<Mutex<Option<GameState>>>,
+    state_manager: &Arc<Mutex<Box<dyn StateManager>>>,
+    players: &Arc<Mutex<GamePlayers>>,
+    net: &Arc<UdpNetwork>,
     msg: GameMessage,
     addr: SocketAddr,
 ) {
     let now = Instant::now();
 
+    // Сначала обрабатываем Announcement и Discover (не требуют StateManager)
     match msg.r#type.as_ref() {
         Some(game_message::Type::Announcement(announcement_msg)) => {
             let mut games = discovered.lock().expect("discovered mutex poisoned");
@@ -313,20 +394,44 @@ fn process_message(
                     .collect(),
             };
             let _ = app.emit("games-discovered", payload);
-        }
-        Some(game_message::Type::State(state_msg)) => {
-            let mut state_guard = last_state.lock().expect("state mutex poisoned");
-            *state_guard = Some(state_msg.state.clone());
-            drop(state_guard);
-
-            let payload = game_state_to_dto(&state_msg.state);
-            let _ = app.emit("game-state", payload);
-        }
-        Some(game_message::Type::Error(error_msg)) => {
-            let _ = app.emit("game-error", error_msg.error_message.clone());
+            return;
         }
         Some(game_message::Type::Discover(_)) => {
             let _ = app.emit("network-event", "discover");
+            return;
+        }
+        _ => {}
+    }
+
+    // Обрабатываем State отдельно (для обновления UI)
+    if let Some(game_message::Type::State(state_msg)) = msg.r#type.as_ref() {
+        let mut state_guard = last_state.lock().expect("state mutex poisoned");
+        *state_guard = Some(state_msg.state.clone());
+        
+        // Обновляем players из state
+        let mut players_guard = players.lock().expect("players mutex poisoned");
+        *players_guard = state_msg.state.players.clone();
+        drop(players_guard);
+        drop(state_guard);
+
+        let payload = game_state_to_dto(&state_msg.state);
+        let _ = app.emit("game-state", payload);
+    }
+
+    // Все остальные сообщения обрабатываем через StateManager
+    let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+    let mut players_guard = players.lock().expect("players mutex poisoned");
+    
+    if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard) {
+        eprintln!("Error handling message: {}", e);
+    }
+    drop(players_guard);
+    drop(state_mgr);
+
+    // Эмитим события для остальных типов сообщений
+    match msg.r#type.as_ref() {
+        Some(game_message::Type::Error(error_msg)) => {
+            let _ = app.emit("game-error", error_msg.error_message.clone());
         }
         Some(game_message::Type::Join(_)) => {
             let _ = app.emit("network-event", "join");
@@ -343,13 +448,11 @@ fn process_message(
         Some(game_message::Type::RoleChange(_)) => {
             let _ = app.emit("network-event", "role-change");
         }
-        _ => {
-            let _ = app.emit("network-event", "unknown");
-        }
+        _ => {}
     }
 }
 
-fn game_state_to_dto(state: &GameState) -> GameStateDto {
+pub fn game_state_to_dto(state: &GameState) -> GameStateDto {
     GameStateDto {
         state_order: state.state_order,
         snakes: state
