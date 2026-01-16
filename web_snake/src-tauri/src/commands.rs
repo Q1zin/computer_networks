@@ -1,5 +1,6 @@
+use crate::game::GameManager;
 use crate::network::{GameStateDto, NetworkService};
-use crate::snakes::NodeRole;
+use crate::snakes::{GameConfig, GamePlayer, NodeRole, PlayerType};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -18,11 +19,33 @@ pub fn create_new_game(
     width: u32,
     height: u32,
     frequency: u32,
+    game_manager: State<GameManager>,
 ) -> Result<String, String> {
     println!(
         "Creating game: {} ({}x{}), frequency: {}ms",
         name, width, height, frequency
     );
+
+    let config = GameConfig {
+        width: Some(width as i32),
+        height: Some(height as i32),
+        food_static: Some(1),
+        state_delay_ms: Some(frequency as i32),
+    };
+
+    let host_player = GamePlayer {
+        name: "Host".to_string(),
+        id: 1,
+        ip_address: None,
+        port: None,
+        role: NodeRole::Master as i32,
+        r#type: Some(PlayerType::Human as i32),
+        score: 0,
+    };
+
+    game_manager
+        .create_game(config, host_player)
+        .map_err(|e| e.to_string())?;
 
     Ok(format!("Game '{}' created successfully", name))
 }
@@ -59,16 +82,37 @@ pub fn join_game_as_spectator(
 }
 
 #[tauri::command]
-pub fn send_steer(direction: Direction, network: State<NetworkService>) -> Result<(), String> {
+pub fn send_steer(
+    direction: Direction,
+    network: State<NetworkService>,
+    game_manager: State<GameManager>,
+) -> Result<(), String> {
     println!("Steering to: {:?}", direction);
+    
+    // Добавляем поворот в очередь для локальной игры
+    if let Some(player_id) = game_manager.my_player_id() {
+        let dir = match direction {
+            Direction::Up => crate::snakes::Direction::Up,
+            Direction::Down => crate::snakes::Direction::Down,
+            Direction::Left => crate::snakes::Direction::Left,
+            Direction::Right => crate::snakes::Direction::Right,
+        };
+        game_manager.queue_steer(player_id, dir);
+    }
+    
+    // Отправляем по сети
     network
         .send_steer(direction as i32)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn leave_game(network: State<NetworkService>) -> Result<(), String> {
+pub fn leave_game(
+    network: State<NetworkService>,
+    game_manager: State<GameManager>,
+) -> Result<(), String> {
     println!("Leaving game");
+    game_manager.reset();
     network.leave_game().map_err(|e| e.to_string())
 }
 
@@ -79,8 +123,19 @@ pub fn become_spectator(network: State<NetworkService>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_game_state(network: State<NetworkService>) -> Result<Option<GameStateDto>, String> {
+pub fn get_game_state(
+    network: State<NetworkService>,
+    game_manager: State<GameManager>,
+) -> Result<Option<GameStateDto>, String> {
     println!("Getting game state");
+    
+    // Сначала пытаемся получить состояние из локальной игры
+    if let Some(_state) = game_manager.get_state() {
+        // Преобразуем в DTO (используем существующую функцию из network)
+        return Ok(network.latest_state());
+    }
+    
+    // Если локальной игры нет, получаем из сети
     Ok(network.latest_state())
 }
 
