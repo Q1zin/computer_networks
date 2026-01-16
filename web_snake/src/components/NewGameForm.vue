@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const emit = defineEmits<{
@@ -10,9 +10,36 @@ const emit = defineEmits<{
 const gameName = ref("");
 const fieldWidth = ref(20);
 const fieldHeight = ref(20);
-const updateFrequency = ref(100);
+const updateFrequency = ref(500);
+const errorMessage = ref("");
+
+// Валидация параметров по ТЗ
+const validationError = computed(() => {
+  if (!gameName.value.trim()) {
+    return "Введите имя игры";
+  }
+  if (fieldWidth.value < 10 || fieldWidth.value > 100) {
+    return "Ширина поля должна быть от 10 до 100";
+  }
+  if (fieldHeight.value < 10 || fieldHeight.value > 100) {
+    return "Высота поля должна быть от 10 до 100";
+  }
+  if (updateFrequency.value < 100 || updateFrequency.value > 3000) {
+    return "Частота обновления должна быть от 100 до 3000 мс";
+  }
+  return null;
+});
+
+const isValid = computed(() => validationError.value === null);
 
 async function createGame() {
+  if (!isValid.value) {
+    errorMessage.value = validationError.value || "";
+    return;
+  }
+  
+  errorMessage.value = "";
+  
   try {
     const result = await invoke("create_new_game", {
       name: gameName.value,
@@ -24,6 +51,7 @@ async function createGame() {
     emit("created");
   } catch (error) {
     console.error("Failed to create game:", error);
+    errorMessage.value = String(error);
   }
 }
 </script>
@@ -69,13 +97,23 @@ async function createGame() {
       <input 
         v-model.number="updateFrequency" 
         type="number" 
-        min="50" 
-        max="1000" 
+        min="100" 
+        max="3000" 
         step="50" 
       />
+      <span class="hint">100 - 3000 мс</span>
     </div>
     
-    <button class="create-button" @click="createGame">
+    <div v-if="errorMessage" class="error-message">
+      {{ errorMessage }}
+    </div>
+    
+    <button 
+      class="create-button" 
+      :class="{ disabled: !isValid }"
+      :disabled="!isValid"
+      @click="createGame"
+    >
       Создать игру
     </button>
   </div>
@@ -162,5 +200,29 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .create-button:active {
   transform: scale(0.98);
+}
+
+.create-button.disabled {
+  background: #4a5568;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.create-button.disabled:hover {
+  background: #4a5568;
+}
+
+.error-message {
+  color: #fc8181;
+  font-size: 13px;
+  padding: 8px 12px;
+  background: rgba(252, 129, 129, 0.1);
+  border: 1px solid rgba(252, 129, 129, 0.3);
+  border-radius: 4px;
+}
+
+.hint {
+  color: #718096;
+  font-size: 12px;
 }
 </style>

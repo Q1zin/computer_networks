@@ -263,18 +263,30 @@ impl GameField for FieldImpl {
         // Начисление очков
         let mut score_delta: HashMap<i32, i32> = HashMap::new();
 
+        // +1 за съеденную еду
         for (id, ate) in &will_eat {
             if *ate {
                 *score_delta.entry(*id).or_insert(0) += 1;
             }
         }
 
+        // +1 жертве, в которую врезались (если жертва не врезалась сама в себя)
+        // По ТЗ: "Змейка, в которую «врезались», зарабатывает +1 балл 
+        // (если она не врезалась сама в себя, конечно)."
+        // Змейка погибает независимо от того, погибает ли жертва на этом же ходу.
         for (attacker_id, body) in &moved_bodies {
             let head = body[0];
+            
+            // Проверяем, врезалась ли голова в тело какой-либо змейки
+            // body_owner содержит только тело (без головы), поэтому столкновение голов
+            // здесь не учитывается (что правильно - при столкновении голов очки никому)
             if let Some(victim_id) = body_owner.get(&head) {
+                // Атакующий врезался в чьё-то тело
                 if victim_id != attacker_id {
+                    // Это не врезание в самого себя (свой хвост учитывается в self_crash)
                     let victim_self_crash = *self_crash.get(victim_id).unwrap_or(&false);
                     if !victim_self_crash {
+                        // Жертва не врезалась сама в себя - начисляем ей очко
                         *score_delta.entry(*victim_id).or_insert(0) += 1;
                     }
                 }
