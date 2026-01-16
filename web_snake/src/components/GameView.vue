@@ -91,6 +91,7 @@ async function becomeSpectator() {
 
 let unlistenGameState: (() => void) | null = null;
 let unlistenPlayerLeft: (() => void) | null = null;
+let unlistenGameOver: (() => void) | null = null;
 
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyPress);
@@ -109,6 +110,13 @@ onMounted(async () => {
     );
   });
   
+  // Слушаем событие окончания игры (нет master и deputy)
+  unlistenGameOver = await listen<string>("game-over", (event) => {
+    console.log("Game over:", event.payload);
+    alert("Игра завершена: " + event.payload);
+    emit("leave");
+  });
+  
   gameFieldRef.value?.drawGame();
 });
 
@@ -120,6 +128,9 @@ onUnmounted(() => {
   }
   if (unlistenPlayerLeft) {
     unlistenPlayerLeft();
+  }
+  if (unlistenGameOver) {
+    unlistenGameOver();
   }
 });
 

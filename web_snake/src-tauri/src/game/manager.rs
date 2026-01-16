@@ -257,8 +257,36 @@ impl GameManager {
                                     println!("[game-loop-net] Tick #{}, state_order={}", tick_count, new_state.state_order);
                                 }
                                 
-                                // Проверяем, умерла ли змейка master'а
+                                // Получаем актуальные роли игроков
+                                let players_snapshot = network.get_players();
                                 let my_id = my_player_id.lock().unwrap().unwrap_or(0);
+                                
+                                // Проверяем, есть ли ещё активные игроки (не Viewer) с живыми змейками
+                                let active_player_ids: Vec<i32> = players_snapshot.players.iter()
+                                    .filter(|p| p.role != crate::snakes::NodeRole::Viewer as i32)
+                                    .map(|p| p.id)
+                                    .collect();
+                                
+                                let alive_active_snakes: Vec<i32> = new_state.snakes.iter()
+                                    .filter(|s| active_player_ids.contains(&s.player_id))
+                                    .map(|s| s.player_id)
+                                    .collect();
+                                
+                                // Если не осталось активных игроков со змейками - игра окончена
+                                if alive_active_snakes.is_empty() {
+                                    println!("[game-loop-net] No active players with snakes left - game over!");
+                                    running.store(false, Ordering::SeqCst);
+                                    
+                                    // Уведомляем всех о завершении игры
+                                    let _ = app_clone.emit("game-over", "All players died");
+                                    
+                                    // Сбрасываем сессию в Lobby чтобы остановить announcements
+                                    let _ = network.reset_local_session();
+                                    
+                                    break;
+                                }
+                                
+                                // Проверяем, умерла ли змейка master'а
                                 let my_snake_alive = new_state.snakes.iter().any(|s| s.player_id == my_id);
                                 
                                 if !my_snake_alive && !master_snake_dead && my_id != 0 {
@@ -295,7 +323,6 @@ impl GameManager {
                                 // Перед отрисовкой накладываем роли на State, чтобы не было
                                 // ситуации "2+ игроков, но в State нет deputy".
                                 let mut state_for_ui = new_state.clone();
-                                let players_snapshot = network.get_players();
                                 let mut role_by_id = std::collections::HashMap::<i32, i32>::new();
                                 for p in &players_snapshot.players {
                                     role_by_id.insert(p.id, p.role);

@@ -867,6 +867,48 @@ impl StateManager for StateImpl {
                                     };
                                     self.last_send_times.insert(dep_addr, now);
                                 }
+                            } else {
+                                // Нет deputy - игра завершается, выходим в lobby
+                                println!("[check_timeouts] Master gone, no deputy - game over, returning to lobby");
+                                let _ = app.emit("game-over", "No master or deputy available");
+                                self.mode = GameMode::Lobby;
+                                self.known_players.clear();
+                                self.removed_players.clear();
+                            }
+                        }
+                    }
+                    NodeRole::Viewer => {
+                        // Viewer тоже должен выйти в lobby если master пропал и deputy нет
+                        let master_disappeared = master_addr.is_some()
+                            && (dropped_role == Some(NodeRole::Master as i32)
+                                || (dropped_addr.is_some() && dropped_addr == master_addr));
+
+                        if master_disappeared {
+                            let dep_id = deputy_id.or_else(|| {
+                                players
+                                    .players
+                                    .iter()
+                                    .find(|p| p.role == NodeRole::Deputy as i32)
+                                    .map(|p| p.id)
+                            });
+
+                            if let Some(dep_id) = dep_id {
+                                if let Some(dep_addr) = self.known_players.get(&dep_id).map(|e| e.1)
+                                {
+                                    self.mode = GameMode::InGame {
+                                        role: NodeRole::Viewer,
+                                        master_addr: Some(dep_addr),
+                                        deputy_id: Some(dep_id),
+                                    };
+                                    self.last_send_times.insert(dep_addr, now);
+                                }
+                            } else {
+                                // Нет deputy - игра завершается, выходим в lobby
+                                println!("[check_timeouts] Master gone, no deputy - game over, returning to lobby");
+                                let _ = app.emit("game-over", "No master or deputy available");
+                                self.mode = GameMode::Lobby;
+                                self.known_players.clear();
+                                self.removed_players.clear();
                             }
                         }
                     }
