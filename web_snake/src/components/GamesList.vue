@@ -8,20 +8,14 @@ interface GameInfo {
   playerCount: number;
 }
 
-const availableGames = ref<GameInfo[]>([
-  // Мок данные для демонстрации
-  { name: "Быстрая игра #1", playerCount: 3 },
-  { name: "Турнир профессионалов", playerCount: 8 },
-  { name: "Для новичков", playerCount: 2 },
-  { name: "Мега битва", playerCount: 12 },
-  { name: "Вечерняя игра", playerCount: 5 },
-]);
+const availableGames = ref<GameInfo[]>([]);
 
 const selectedGame = ref<string | null>(null);
 
 async function refreshGameList() {
   try {
     const games = await invoke<GameInfo[]>("get_available_games");
+    console.log("Fetched games:", games);
     availableGames.value = games;
   } catch (error) {
     console.error("Failed to refresh game list:", error);
