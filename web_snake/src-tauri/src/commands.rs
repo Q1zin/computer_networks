@@ -19,6 +19,23 @@ pub fn create_new_game(
         name, width, height, frequency
     );
 
+    // Валидация параметров GameConfig по ТЗ:
+    // - width: 10-100
+    // - height: 10-100
+    // - state_delay_ms: 100-3000
+    if width < 10 || width > 100 {
+        return Err(format!("Ширина поля должна быть от 10 до 100 (получено: {})", width));
+    }
+    if height < 10 || height > 100 {
+        return Err(format!("Высота поля должна быть от 10 до 100 (получено: {})", height));
+    }
+    if frequency < 100 || frequency > 3000 {
+        return Err(format!("Частота обновления должна быть от 100 до 3000 мс (получено: {})", frequency));
+    }
+    if name.trim().is_empty() {
+        return Err("Имя игры не может быть пустым".to_string());
+    }
+
     // Важное: при создании новой игры в том же процессе нужно сбросить хвосты прошлой
     // сессии (накопленные змейки, last_state в UI, прошлый my_id и т.п.).
     game_manager.reset();

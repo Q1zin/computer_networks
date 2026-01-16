@@ -1205,8 +1205,9 @@ fn process_message(
                                 )),
                             };
                             
-                            let _ = net.send_multicast(msg);
-                            println!("Sent announcement (response to Discover)");
+                            // По ТЗ: ответ на DiscoverMsg отправляется unicast отправителю
+                            let _ = net.send_unicast(addr, msg);
+                            println!("Sent announcement (unicast response to Discover from {})", addr);
                         }
                     }
                 }
