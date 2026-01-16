@@ -433,6 +433,34 @@ impl NetworkService {
         Ok(())
     }
 
+    /// Отправка State всем известным игрокам (только для Master)
+    pub fn broadcast_state(&self, state: &GameState) -> Result<()> {
+        let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+        let known_players = state_mgr.get_known_players();
+        drop(state_mgr);
+
+        let msg_seq = next_seq(&self.seq);
+        let msg = GameMessage {
+            msg_seq,
+            sender_id: Some(1), // Master ID
+            receiver_id: None,
+            r#type: Some(game_message::Type::State(game_message::StateMsg {
+                state: state.clone(),
+            })),
+        };
+
+        // Отправляем каждому известному игроку
+        for (player_id, addr) in known_players {
+            if player_id != 1 { // Не отправляем себе
+                if let Err(e) = self.net.send_unicast(addr, msg.clone()) {
+                    eprintln!("Failed to send state to player {}: {}", player_id, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn get_players(&self) -> GamePlayers {
         let players_guard = self.players.lock().expect("players mutex poisoned");
         players_guard.clone()

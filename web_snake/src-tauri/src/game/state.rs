@@ -42,6 +42,7 @@ pub trait StateManager: Send + Sync {
         delay_ms: u32,
         net: &dyn NetworkProtocol,
     ) -> Result<()>;
+    fn get_known_players(&self) -> Vec<(i32, SocketAddr)>;
 }
 
 pub struct StateImpl {
@@ -422,6 +423,13 @@ impl StateManager for StateImpl {
         }
 
         Ok(())
+    }
+
+    fn get_known_players(&self) -> Vec<(i32, SocketAddr)> {
+        self.known_players
+            .iter()
+            .map(|(id, (_player, addr, _last_seen))| (*id, *addr))
+            .collect()
     }
 }
 

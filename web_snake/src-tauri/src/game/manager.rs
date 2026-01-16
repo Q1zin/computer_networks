@@ -184,6 +184,77 @@ impl GameManager {
         });
     }
 
+    /// Запуск игрового цикла с поддержкой отправки State по сети (только для Master)
+    pub fn start_game_loop_with_network(&self, app: AppHandle, network: Arc<crate::network::NetworkService>) {
+        if self.running.swap(true, Ordering::SeqCst) {
+            println!("Game loop already running");
+            return;
+        }
+
+        let field = Arc::clone(&self.field);
+        let pending_steers = Arc::clone(&self.pending_steers);
+        let last_tick = Arc::clone(&self.last_tick);
+        let running = Arc::clone(&self.running);
+        let config = Arc::clone(&self.config);
+        let app_clone = app.clone();
+
+        std::thread::spawn(move || {
+            while running.load(Ordering::SeqCst) {
+                let delay_ms = {
+                    let cfg_guard = config.lock().unwrap();
+                    cfg_guard
+                        .as_ref()
+                        .and_then(|c| c.state_delay_ms)
+                        .unwrap_or(500)
+                };
+
+                let should_update = {
+                    let last_tick_guard = last_tick.lock().unwrap();
+                    last_tick_guard.elapsed() >= Duration::from_millis(delay_ms as u64)
+                };
+
+                if should_update {
+                    let mut field_guard = field.lock().unwrap();
+                    if let Some(fld) = field_guard.as_mut() {
+                        let mut steers_guard = pending_steers.lock().unwrap();
+                        let steers = std::mem::take(&mut *steers_guard);
+                        drop(steers_guard);
+
+                        match fld.update(steers) {
+                            Ok(new_state) => {
+                                // Получаем config для передачи в DTO
+                                let cfg_guard = config.lock().unwrap();
+                                let game_config = cfg_guard.as_ref().cloned().unwrap_or(GameConfig {
+                                    width: Some(40),
+                                    height: Some(30),
+                                    food_static: Some(1),
+                                    state_delay_ms: Some(1000),
+                                });
+                                drop(cfg_guard);
+                                
+                                // Отправляем State через event используя DTO (для локального фронтенда)
+                                let state_dto = game_state_to_dto(&new_state, &game_config);
+                                let _ = app_clone.emit("game-state", state_dto);
+                                
+                                // Отправляем State по сети всем игрокам
+                                if let Err(e) = network.broadcast_state(&new_state) {
+                                    eprintln!("Failed to broadcast state: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Game update error: {}", e);
+                            }
+                        }
+
+                        *last_tick.lock().unwrap() = Instant::now();
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
+
     /// Настройка обработчиков сетевых событий для Master
     pub fn setup_network_handlers(&self, app: AppHandle) {
         let field_for_join = Arc::clone(&self.field);

@@ -2,7 +2,7 @@ use crate::game::GameManager;
 use crate::network::{GameStateDto, NetworkService};
 use crate::snakes::{GameConfig, GamePlayer, NodeRole, PlayerType};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{State, Listener};
 
 #[tauri::command]
 pub fn create_new_game(
@@ -49,8 +49,8 @@ pub fn create_new_game(
     // Настраиваем обработчики сетевых событий (Join, Steer)
     game_manager.setup_network_handlers(app.clone());
 
-    // Запускаем игровой цикл
-    game_manager.start_game_loop(app);
+    // Запускаем игровой цикл с поддержкой broadcast через NetworkService
+    game_manager.start_game_loop_with_network(app, network.inner().clone().into());
 
     Ok(format!("Game '{}' created successfully", name))
 }
