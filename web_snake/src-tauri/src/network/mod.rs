@@ -260,6 +260,8 @@ impl NetworkService {
                             &players,
                             &game_config,
                             &net,
+                            &game_name,
+                            &seq,
                             msg,
                             addr,
                         );
@@ -951,6 +953,8 @@ fn process_message(
     players: &Arc<Mutex<GamePlayers>>,
     game_config: &Arc<Mutex<Option<GameConfig>>>,
     net: &Arc<UdpNetwork>,
+    game_name: &Arc<Mutex<String>>,
+    seq: &Arc<Mutex<i64>>,
     msg: GameMessage,
     addr: SocketAddr,
 ) {
@@ -1016,6 +1020,81 @@ fn process_message(
         }
         Some(game_message::Type::Discover(_)) => {
             let _ = app.emit("network-event", "discover");
+            
+            // Если мы Master - сразу отправляем Announcement в ответ
+            use crate::game::state::GameMode;
+            let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+            let is_master = matches!(state_mgr.current_mode(), GameMode::InGame { role: NodeRole::Master, .. });
+            drop(state_mgr);
+            
+            if is_master {
+                let name_guard = game_name.lock().expect("game_name mutex poisoned");
+                let game_name_str = name_guard.clone();
+                drop(name_guard);
+                
+                if !game_name_str.is_empty() {
+                    let config_guard = game_config.lock().expect("game_config mutex poisoned");
+                    if let Some(config) = config_guard.as_ref() {
+                        let cfg = *config;
+                        drop(config_guard);
+                        
+                        let local_addr = net.get_local_addr().ok();
+                        if let Some(addr) = local_addr {
+                            let players_guard = players.lock().expect("players mutex poisoned");
+                            let mut players_clone = players_guard.clone();
+                            
+                            // Заполняем IP и порт для Master
+                            for p in &mut players_clone.players {
+                                if p.role == NodeRole::Master as i32 {
+                                    let ip = if addr.ip().is_unspecified() {
+                                        "127.0.0.1".to_string()
+                                    } else {
+                                        addr.ip().to_string()
+                                    };
+                                    p.ip_address = Some(ip);
+                                    p.port = Some(addr.port() as i32);
+                                }
+                            }
+                            drop(players_guard);
+                            
+                            // Фильтруем активных игроков
+                            let active_players = GamePlayers {
+                                players: players_clone.players
+                                    .into_iter()
+                                    .filter(|p| p.role != NodeRole::Viewer as i32)
+                                    .collect(),
+                            };
+                            
+                            let announcement = crate::snakes::GameAnnouncement {
+                                players: active_players,
+                                config: cfg,
+                                can_join: Some(true),
+                                game_name: game_name_str,
+                            };
+                            
+                            let msg_seq = {
+                                let mut seq_guard = seq.lock().expect("seq mutex poisoned");
+                                *seq_guard += 1;
+                                *seq_guard
+                            };
+                            
+                            let msg = crate::snakes::GameMessage {
+                                msg_seq,
+                                sender_id: None,
+                                receiver_id: None,
+                                r#type: Some(crate::snakes::game_message::Type::Announcement(
+                                    crate::snakes::game_message::AnnouncementMsg {
+                                        games: vec![announcement],
+                                    }
+                                )),
+                            };
+                            
+                            let _ = net.send_multicast(msg);
+                            println!("Sent announcement (response to Discover)");
+                        }
+                    }
+                }
+            }
             return;
         }
         _ => {}
