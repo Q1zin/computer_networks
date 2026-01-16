@@ -156,13 +156,35 @@ impl NetworkService {
             while running.load(Ordering::SeqCst) {
                 match net.poll_receive() {
                     Ok(Some((msg, addr))) => {
-                        // Если мы вышли из игры (current_master=None), игнорируем State пакеты.
-                        // Это убирает "продолжаю получать" после leave_game даже если есть
-                        // ин-флайт UDP пакеты или мастер еще не успел отписать адрес.
-                        if matches!(msg.r#type.as_ref(), Some(game_message::Type::State(_))) {
-                            let master = current_master.lock().expect("master mutex poisoned");
-                            if master.is_none() {
-                                continue;
+                        let is_game_message = matches!(
+                            msg.r#type.as_ref(),
+                            Some(game_message::Type::State(_))
+                                | Some(game_message::Type::Ping(_))
+                                | Some(game_message::Type::Ack(_))
+                                | Some(game_message::Type::Join(_))
+                                | Some(game_message::Type::Steer(_))
+                                | Some(game_message::Type::RoleChange(_))
+                                | Some(game_message::Type::Error(_))
+                        );
+
+                        if is_game_message {
+                            use crate::game::state::GameMode;
+                            let is_master = {
+                                let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+                                matches!(
+                                    state_mgr.current_mode(),
+                                    GameMode::InGame {
+                                        role: NodeRole::Master,
+                                        ..
+                                    }
+                                )
+                            };
+
+                            if !is_master {
+                                let master = current_master.lock().expect("master mutex poisoned");
+                                if master.is_none() {
+                                    continue;
+                                }
                             }
                         }
 
@@ -396,18 +418,28 @@ impl NetworkService {
             .expect("master mutex poisoned");
 
         if let Some(master_addr) = master_addr {
-            let msg_seq = next_seq(&self.seq);
-            let msg = GameMessage {
-                msg_seq,
-                sender_id: Some(self.my_player_id()),
-                receiver_id: Some(1),
-                r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
-                    sender_role: Some(NodeRole::Viewer as i32),
-                    receiver_role: Some(NodeRole::Viewer as i32),
-                })),
-            };
+            // UDP ненадёжный: чтобы Master почти наверняка увидел disconnect,
+            // шлём RoleChange несколько раз.
+            let net = Arc::clone(&self.net);
+            let seq = Arc::clone(&self.seq);
+            let sender_id = self.my_player_id();
 
-            let _ = self.net.send_unicast(master_addr, msg);
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    let msg_seq = next_seq(&seq);
+                    let msg = GameMessage {
+                        msg_seq,
+                        sender_id: Some(sender_id),
+                        receiver_id: Some(1),
+                        r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                            sender_role: Some(NodeRole::Viewer as i32),
+                            receiver_role: Some(NodeRole::Viewer as i32),
+                        })),
+                    };
+                    let _ = net.send_unicast(master_addr, msg);
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            });
         }
 
         // Локально сбрасываем состояние в Lobby: перестаём пинговать и обнуляем топологию.
