@@ -30,7 +30,8 @@ function onGameCreated() {
 
 async function exitApp() {
   try {
-    await invoke("exit_app");
+    let res = await invoke("exit_app");
+    console.log("Exited app:", res);
   } catch (error) {
     console.error("Failed to exit:", error);
   }

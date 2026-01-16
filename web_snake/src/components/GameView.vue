@@ -101,7 +101,8 @@ function handleKeyPress(event: KeyboardEvent) {
 
 async function sendDirection(direction: Direction) {
   try {
-    await invoke("send_steer", { direction });
+    let res = await invoke("send_steer", { direction });
+    console.log("Sent direction:", res);
   } catch (error) {
     console.error("Failed to send direction:", error);
   }
@@ -109,7 +110,8 @@ async function sendDirection(direction: Direction) {
 
 async function leaveGame() {
   try {
-    await invoke("leave_game");
+    let res = await invoke("leave_game");
+    console.log("Left game:", res);
     emit("leave");
   } catch (error) {
     console.error("Failed to leave game:", error);
@@ -118,7 +120,8 @@ async function leaveGame() {
 
 async function becomeSpectator() {
   try {
-    await invoke("become_spectator");
+    let res = await invoke("become_spectator");
+    console.log("Became spectator:", res);
   } catch (error) {
     console.error("Failed to become spectator:", error);
   }
@@ -135,7 +138,7 @@ function startMockEvents() {
     gameState.value = {
       ...gameState.value,
       stateOrder,
-      snakes: gameState.value.snakes.map((snake, idx) => {
+      snakes: gameState.value.snakes.map((snake) => {
         const head = snake.points[0];
         let newX = head.x;
         let newY = head.y;

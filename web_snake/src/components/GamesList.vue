@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import GameItem from "./GameItem.vue";
 
 interface GameInfo {
@@ -9,22 +10,37 @@ interface GameInfo {
 }
 
 const availableGames = ref<GameInfo[]>([]);
-
 const selectedGame = ref<string | null>(null);
+
+let unlisten: UnlistenFn | null = null;
 
 async function refreshGameList() {
   try {
-    const games = await invoke<GameInfo[]>("get_available_games");
-    console.log("Fetched games:", games);
-    availableGames.value = games;
+    let res = await invoke("search_games");
+    console.log("Sent discover request ", res);
   } catch (error) {
-    console.error("Failed to refresh game list:", error);
+    console.error("Failed to send discover:", error);
   }
 }
 
 function selectGame(name: string) {
   selectedGame.value = name;
 }
+
+onMounted(async () => {
+  unlisten = await listen<GameInfo[]>("games-discovered", (event) => {
+    console.log("Games discovered:", event.payload);
+    availableGames.value = event.payload;
+  });
+
+  refreshGameList();
+});
+
+onUnmounted(() => {
+  if (unlisten) {
+    unlisten();
+  }
+});
 </script>
 
 <template>

@@ -1,8 +1,13 @@
 mod commands;
+mod network;
+mod snakes;
+
+use tauri::Manager;
+use network::NetworkService;
 
 use commands::{
+    search_games,
     create_new_game,
-    get_available_games,
     join_game_as_player,
     join_game_as_spectator,
     exit_app,
@@ -16,9 +21,15 @@ use commands::{
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(NetworkService::new().expect("Failed to init network service"))
+        .setup(|app| {
+            let network = app.state::<NetworkService>();
+            network.start_polling(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            search_games,
             create_new_game,
-            get_available_games,
             join_game_as_player,
             join_game_as_spectator,
             exit_app,

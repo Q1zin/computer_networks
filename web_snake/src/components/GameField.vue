@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import type { GameState, GameConfig, Snake, Coord } from "../types/game";
 
 interface Props {
