@@ -251,6 +251,9 @@ impl GameManager {
                         let steers = std::mem::take(&mut *steers_guard);
                         drop(steers_guard);
 
+                        // Обновляем флаг is_full для корректной обработки JoinMsg и AnnouncementMsg
+                        network.set_is_full(fld.is_full());
+
                         match fld.update(steers) {
                             Ok(new_state) => {
                                 if tick_count <= 3 {

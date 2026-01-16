@@ -44,6 +44,7 @@ pub trait StateManager: Send + Sync {
         net: &dyn NetworkProtocol,
         players: &mut GamePlayers,
         app: &tauri::AppHandle,
+        is_full: bool,
     ) -> Result<()>;
     fn pick_deputy(&self, players: &GamePlayers) -> Option<i32>;
     fn check_timeouts(
@@ -253,6 +254,7 @@ impl StateManager for StateImpl {
         net: &dyn NetworkProtocol,
         players: &mut GamePlayers,
         app: &tauri::AppHandle,
+        is_full: bool,
     ) -> Result<()> {
         let mut ack_already_sent = false;
 
@@ -299,6 +301,25 @@ impl StateManager for StateImpl {
                 },
                 Some(game_message::Type::Join(join)),
             ) => {
+                // По ТЗ: Viewer может присоединиться всегда, а для NORMAL нужно проверить место на поле
+                let wants_to_play = join.requested_role != NodeRole::Viewer as i32;
+                
+                if wants_to_play && is_full {
+                    // Нет места на поле — отправляем ErrorMsg
+                    let error_msg = GameMessage {
+                        msg_seq: msg.msg_seq,
+                        sender_id: Some(self.my_id),
+                        receiver_id: None,
+                        r#type: Some(game_message::Type::Error(game_message::ErrorMsg {
+                            error_message: "Нет места на поле для новой змейки. Попробуйте позже или присоединитесь как зритель.".to_string(),
+                        })),
+                    };
+                    net.send_unicast(sender, error_msg)?;
+                    self.last_send_times.insert(sender, Instant::now());
+                    ack_already_sent = true; // Не отправляем Ack после ErrorMsg
+                    return Ok(());
+                }
+                
                 let new_id = self.select_player_id(players);
                 players.players.push(GamePlayer {
                     name: join.player_name.clone(),

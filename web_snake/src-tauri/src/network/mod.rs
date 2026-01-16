@@ -44,6 +44,8 @@ pub struct DiscoveredGameDto {
     pub game_name: String,
     pub players_count: usize,
     pub can_join: bool,
+    pub width: i32,
+    pub height: i32,
     pub master_address: String,
     pub master_ip: Option<String>,
     pub master_port: Option<i32>,
@@ -124,6 +126,8 @@ pub struct NetworkService {
     pending_messages: Arc<Mutex<std::collections::HashMap<i64, PendingMessage>>>,
     /// Последний известный state_order (для игнорирования устаревших State)
     last_known_state_order: Arc<Mutex<i32>>,
+    /// Флаг, указывающий что поле заполнено (нет места для новых змеек)
+    is_full: Arc<AtomicBool>,
 }
 
 fn overlay_player_meta_from_players(state: &mut GameState, players: &GamePlayers) {
@@ -161,6 +165,7 @@ impl NetworkService {
             seq: Arc::new(Mutex::new(0)),
             pending_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
             last_known_state_order: Arc::new(Mutex::new(0)),
+            is_full: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -182,6 +187,7 @@ impl NetworkService {
         let seq = Arc::clone(&self.seq);
         let pending_messages = Arc::clone(&self.pending_messages);
         let last_known_state_order = Arc::clone(&self.last_known_state_order);
+        let is_full = Arc::clone(&self.is_full);
         let app_handle = app.clone();
 
         std::thread::spawn(move || {
@@ -294,6 +300,7 @@ impl NetworkService {
                             &seq,
                             &pending_messages,
                             &last_known_state_order,
+                            &is_full,
                             msg,
                             addr,
                         );
@@ -433,7 +440,7 @@ impl NetworkService {
                                     let announcement = crate::snakes::GameAnnouncement {
                                         players: active_players,
                                         config: cfg,
-                                        can_join: Some(true), // TODO: check is_full from GameManager
+                                        can_join: Some(!is_full.load(Ordering::SeqCst)),
                                         game_name: game_name_str,
                                     };
                                     
@@ -528,10 +535,16 @@ impl NetworkService {
                 let master = game.announcement.players.players.iter()
                     .find(|p| p.role == NodeRole::Master as i32);
                 
+                // Извлекаем конфиг игры (width, height)
+                let width = game.announcement.config.width.unwrap_or(40);
+                let height = game.announcement.config.height.unwrap_or(30);
+                
                 DiscoveredGameDto {
                     game_name: game.announcement.game_name.clone(),
                     players_count: game.announcement.players.players.len(),
                     can_join: game.announcement.can_join.unwrap_or(true),
+                    width,
+                    height,
                     master_address: game.master_address.to_string(),
                     master_ip: master.and_then(|m| m.ip_address.clone()),
                     master_port: master.and_then(|m| m.port),
@@ -1039,6 +1052,16 @@ impl NetworkService {
         Ok(())
     }
 
+    /// Установить флаг заполненности поля (вызывается из GameManager)
+    pub fn set_is_full(&self, full: bool) {
+        self.is_full.store(full, Ordering::SeqCst);
+    }
+
+    /// Получить текущее состояние заполненности поля
+    pub fn get_is_full(&self) -> bool {
+        self.is_full.load(Ordering::SeqCst)
+    }
+
     fn find_master_addr(&self, game_name: &str) -> Result<SocketAddr> {
         let games = self.discovered.lock().expect("discovered mutex poisoned");
         let found = games
@@ -1063,6 +1086,7 @@ fn process_message(
     seq: &Arc<Mutex<i64>>,
     pending_messages: &Arc<Mutex<std::collections::HashMap<i64, PendingMessage>>>,
     last_known_state_order: &Arc<Mutex<i32>>,
+    is_full: &Arc<AtomicBool>,
     msg: GameMessage,
     addr: SocketAddr,
 ) {
@@ -1120,10 +1144,16 @@ fn process_message(
                         let master = game.announcement.players.players.iter()
                             .find(|p| p.role == NodeRole::Master as i32);
                         
+                        // Извлекаем конфиг игры (width, height)
+                        let width = game.announcement.config.width.unwrap_or(40);
+                        let height = game.announcement.config.height.unwrap_or(30);
+                        
                         DiscoveredGameDto {
                             game_name: game.announcement.game_name.clone(),
                             players_count: game.announcement.players.players.len(),
                             can_join: game.announcement.can_join.unwrap_or(true),
+                            width,
+                            height,
                             master_address: game.master_address.to_string(),
                             master_ip: master.and_then(|m| m.ip_address.clone()),
                             master_port: master.and_then(|m| m.port),
@@ -1184,7 +1214,7 @@ fn process_message(
                             let announcement = crate::snakes::GameAnnouncement {
                                 players: active_players,
                                 config: cfg,
-                                can_join: Some(true),
+                                can_join: Some(!is_full.load(Ordering::SeqCst)),
                                 game_name: game_name_str,
                             };
                             
@@ -1327,7 +1357,8 @@ fn process_message(
     // Это критично для deputy takeover: иначе deputy не знает куда слать State.
     state_mgr.observe_players(&players_guard);
     
-    if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard, app) {
+    let is_full_val = is_full.load(Ordering::SeqCst);
+    if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard, app, is_full_val) {
         eprintln!("Error handling message: {}", e);
     }
     
@@ -1371,6 +1402,14 @@ fn process_message(
         }
         Some(game_message::Type::Error(error_msg)) => {
             let _ = app.emit("game-error", error_msg.error_message.clone());
+            
+            // При получении ErrorMsg (например, нет места на поле) — сбрасываем сессию в Lobby,
+            // чтобы клиент мог попробовать подключиться заново или к другой игре.
+            // ВАЖНО: state_mgr уже захвачен выше (строка 1353), поэтому не блокируем снова!
+            use crate::game::state::GameMode;
+            let _ = state_mgr.transition(GameMode::Lobby, &**net);
+            
+            *current_master.lock().expect("current_master mutex poisoned") = None;
         }
         _ => {
             // Остальные события эмитим как общие network-event

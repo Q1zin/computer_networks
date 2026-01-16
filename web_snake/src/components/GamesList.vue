@@ -8,6 +8,8 @@ interface GameInfo {
   gameName: string;
   playersCount: number;
   canJoin: boolean;
+  width: number;
+  height: number;
   masterAddress: string;
   masterIp?: string;
   masterPort?: number;
@@ -67,6 +69,8 @@ onUnmounted(() => {
         :name="game.gameName"
         :player-count="game.playersCount"
         :can-join="game.canJoin"
+        :width="game.width"
+        :height="game.height"
         :master-ip="game.masterIp"
         :master-port="game.masterPort"
         :is-selected="selectedGame === game.gameName"
