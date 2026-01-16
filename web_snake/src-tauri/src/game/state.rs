@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum GameMode {
@@ -29,6 +30,7 @@ pub trait StateManager: Send + Sync {
         sender: SocketAddr,
         net: &dyn NetworkProtocol,
         players: &mut GamePlayers,
+        app: &tauri::AppHandle,
     ) -> Result<()>;
     fn pick_deputy(&self, players: &GamePlayers) -> Option<i32>;
     fn check_timeouts(
@@ -112,6 +114,7 @@ impl StateManager for StateImpl {
         sender: SocketAddr,
         net: &dyn NetworkProtocol,
         players: &mut GamePlayers,
+        app: &tauri::AppHandle,
     ) -> Result<()> {
         let mut ack_already_sent = false;
 
@@ -207,17 +210,40 @@ impl StateManager for StateImpl {
                 },
                 Some(game_message::Type::RoleChange(rc)),
             ) => {
-                let leaving = rc.sender_role == Some(NodeRole::Viewer as i32);
-                if leaving {
+                // RoleChange от игрока со sender_role=VIEWER:
+                // - receiver_role=None  => стать зрителем (остаться подключенным)
+                // - receiver_role=VIEWER => выйти из игры полностью (отписываемся, не шлем State)
+                if rc.sender_role == Some(NodeRole::Viewer as i32) {
                     if let Some(sender_id) = msg.sender_id {
-                        println!("Player {} is leaving the game", sender_id);
+                        let disconnect = rc.receiver_role == Some(NodeRole::Viewer as i32);
+                        if disconnect {
+                            println!("Player {} is leaving the game (disconnect)", sender_id);
+                        } else {
+                            println!("Player {} is becoming a viewer", sender_id);
+                        }
 
                         if let Some(p) = players.players.iter_mut().find(|p| p.id == sender_id) {
                             p.role = NodeRole::Viewer as i32;
                         }
 
-                        self.known_players.remove(&sender_id);
+                        // В обоих случаях змейка становится ZOMBIE
+                        #[derive(Clone, serde::Serialize)]
+                        struct ZombieEvent {
+                            player_id: i32,
+                        }
+                        let _ = app.emit(
+                            "player-became-zombie",
+                            ZombieEvent {
+                                player_id: sender_id,
+                            },
+                        );
 
+                        // Только при disconnect удаляем из known_players (перестаем слать State)
+                        if disconnect {
+                            self.known_players.remove(&sender_id);
+                        }
+
+                        // Если это был deputy — выбираем нового deputy
                         if *deputy_id == Some(sender_id) {
                             let new_dep = self.pick_deputy(players);
                             self.mode = GameMode::InGame {
@@ -232,12 +258,10 @@ impl StateManager for StateImpl {
                                         msg_seq: self.next_seq(),
                                         sender_id: Some(self.my_id),
                                         receiver_id: Some(new_dep),
-                                        r#type: Some(game_message::Type::RoleChange(
-                                            RoleChangeMsg {
-                                                sender_role: Some(NodeRole::Master as i32),
-                                                receiver_role: Some(NodeRole::Deputy as i32),
-                                            },
-                                        )),
+                                        r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                                            sender_role: Some(NodeRole::Master as i32),
+                                            receiver_role: Some(NodeRole::Deputy as i32),
+                                        })),
                                     };
                                     let _ = net.send_unicast(addr, role_msg);
                                 }

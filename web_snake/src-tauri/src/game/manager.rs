@@ -100,6 +100,14 @@ impl GameManager {
         field_guard.as_ref().map(|f| f.is_full()).unwrap_or(false)
     }
 
+    /// Изменение состояния змейки на ZOMBIE (змейка продолжает двигаться сама)
+    pub fn change_snake_to_zombie(&self, player_id: i32) {
+        let mut field_guard = self.field.lock().unwrap();
+        if let Some(field) = field_guard.as_mut() {
+            field.change_snake_to_zombie(player_id);
+        }
+    }
+
     /// Обработка смерти змейки
     pub fn handle_death(&self, snake_id: i32) {
         let mut field_guard = self.field.lock().unwrap();
@@ -258,6 +266,7 @@ impl GameManager {
     /// Настройка обработчиков сетевых событий для Master
     pub fn setup_network_handlers(&self, app: AppHandle) {
         let field_for_join = Arc::clone(&self.field);
+        let field_for_left = Arc::clone(&self.field);
         let pending_steers_for_steer = Arc::clone(&self.pending_steers);
 
         // Подписываемся на событие player-joined для добавления игроков
@@ -272,6 +281,21 @@ impl GameManager {
                 let mut field_guard = field_for_join.lock().unwrap();
                 if let Some(field) = field_guard.as_mut() {
                     let _ = field.place_new_snake(join_event.player_name);
+                }
+            }
+        });
+
+        // Подписываемся на событие player-became-zombie для изменения состояния змейки
+        app.listen("player-became-zombie", move |event| {
+            #[derive(serde::Deserialize)]
+            struct ZombieEvent {
+                player_id: i32,
+            }
+            
+            if let Ok(zombie_event) = serde_json::from_str::<ZombieEvent>(event.payload()) {
+                let mut field_guard = field_for_left.lock().unwrap();
+                if let Some(field) = field_guard.as_mut() {
+                    field.change_snake_to_zombie(zombie_event.player_id);
                 }
             }
         });

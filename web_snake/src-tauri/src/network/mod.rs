@@ -138,6 +138,7 @@ impl NetworkService {
 
         let net = Arc::clone(&self.net);
         let discovered = Arc::clone(&self.discovered);
+        let current_master = Arc::clone(&self.current_master);
         let last_state = Arc::clone(&self.last_state);
         let state_manager = Arc::clone(&self.state_manager);
         let players = Arc::clone(&self.players);
@@ -155,6 +156,16 @@ impl NetworkService {
             while running.load(Ordering::SeqCst) {
                 match net.poll_receive() {
                     Ok(Some((msg, addr))) => {
+                        // Если мы вышли из игры (current_master=None), игнорируем State пакеты.
+                        // Это убирает "продолжаю получать" после leave_game даже если есть
+                        // ин-флайт UDP пакеты или мастер еще не успел отписать адрес.
+                        if matches!(msg.r#type.as_ref(), Some(game_message::Type::State(_))) {
+                            let master = current_master.lock().expect("master mutex poisoned");
+                            if master.is_none() {
+                                continue;
+                            }
+                        }
+
                         println!("Received message from {}: {:?}", addr, msg);
                         process_message(
                             &app_handle,
@@ -370,6 +381,42 @@ impl NetworkService {
     }
 
     pub fn leave_game(&self) -> Result<()> {
+        use crate::game::state::GameMode;
+
+        // Сообщаем Master, что мы ВЫХОДИМ ИЗ ИГРЫ полностью (не просто становимся VIEWER-ом).
+        // Отличаем от become_spectator() тем, что receiver_role = VIEWER.
+        // Master на это удалит нас из known_players и перестанет слать State сразу.
+        let master_addr = *self
+            .current_master
+            .lock()
+            .expect("master mutex poisoned");
+
+        if let Some(master_addr) = master_addr {
+            let msg_seq = next_seq(&self.seq);
+            let msg = GameMessage {
+                msg_seq,
+                sender_id: Some(self.my_player_id()),
+                receiver_id: Some(1),
+                r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
+                    sender_role: Some(NodeRole::Viewer as i32),
+                    receiver_role: Some(NodeRole::Viewer as i32),
+                })),
+            };
+
+            let _ = self.net.send_unicast(master_addr, msg);
+        }
+
+        // Локально сбрасываем состояние в Lobby: перестаём пинговать и обнуляем топологию.
+        let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+        state_mgr.transition(GameMode::Lobby, &*self.net)?;
+        drop(state_mgr);
+
+        *self.current_master.lock().expect("master mutex poisoned") = None;
+        self.net.set_role(NodeRole::Viewer);
+        Ok(())
+    }
+
+    pub fn become_spectator(&self) -> Result<()> {
         let master_addr = self
             .current_master
             .lock()
@@ -379,7 +426,7 @@ impl NetworkService {
         let msg_seq = next_seq(&self.seq);
         let msg = GameMessage {
             msg_seq,
-            sender_id: None,
+            sender_id: Some(self.my_player_id()),
             receiver_id: Some(1),
             r#type: Some(game_message::Type::RoleChange(RoleChangeMsg {
                 sender_role: Some(NodeRole::Viewer as i32),
@@ -388,11 +435,6 @@ impl NetworkService {
         };
 
         self.net.send_unicast(master_addr, msg)?;
-        self.net.set_role(NodeRole::Viewer);
-        Ok(())
-    }
-
-    pub fn become_spectator(&self) -> Result<()> {
         self.net.set_role(NodeRole::Viewer);
         Ok(())
     }
@@ -435,6 +477,8 @@ impl NetworkService {
     }
 
     /// Отправка State всем известным игрокам (только для Master)
+    /// Отправляет всем игрокам в known_players (включая зрителей VIEWER)
+    /// Вышедшие игроки и игроки с timeout уже удалены из known_players
     pub fn broadcast_state(&self, state: &GameState) -> Result<()> {
         let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
         let known_players = state_mgr.get_known_players();
@@ -450,7 +494,7 @@ impl NetworkService {
             })),
         };
 
-        // Отправляем каждому известному игроку
+        // Отправляем всем игрокам в known_players (вышедшие уже удалены)
         for (player_id, addr) in known_players {
             if player_id != 1 { // Не отправляем себе
                 if let Err(e) = self.net.send_unicast(addr, msg.clone()) {
@@ -639,7 +683,7 @@ fn process_message(
     let mut state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
     let mut players_guard = players.lock().expect("players mutex poisoned");
     
-    if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard) {
+    if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard, app) {
         eprintln!("Error handling message: {}", e);
     }
     

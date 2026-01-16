@@ -20,6 +20,7 @@ pub trait GameField: Send + Sync {
     fn is_full(&self) -> bool;
     fn spawn_food(&mut self);
     fn handle_death(&mut self, snake_id: i32);
+    fn change_snake_to_zombie(&mut self, player_id: i32);
     fn config(&self) -> &GameConfig;
 }
 
@@ -389,6 +390,19 @@ impl GameField for FieldImpl {
 
     fn config(&self) -> &GameConfig {
         &self.config
+    }
+
+    fn change_snake_to_zombie(&mut self, player_id: i32) {
+        // Изменяем состояние змейки на ZOMBIE - она продолжает двигаться сама
+        if let Some(snake) = self.snakes.get_mut(&player_id) {
+            snake.state = SnakeState::Zombie;
+            println!("Snake of player {} changed to ZOMBIE state", player_id);
+        }
+        
+        // Также обновляем роль игрока на VIEWER
+        if let Some(player) = self.players.players.iter_mut().find(|p| p.id == player_id) {
+            player.role = NodeRole::Viewer as i32;
+        }
     }
 }
 
