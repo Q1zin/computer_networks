@@ -18,6 +18,9 @@ async function joinAsPlayer() {
       gameName: props.name,
     });
     console.log("Joined as player:", result);
+    if ((window as any).startGame) {
+      (window as any).startGame(props.name);
+    }
   } catch (error) {
     console.error("Failed to join as player:", error);
   }
@@ -29,6 +32,9 @@ async function joinAsSpectator() {
       gameName: props.name,
     });
     console.log("Joined as spectator:", result);
+    if ((window as any).startGame) {
+      (window as any).startGame(props.name);
+    }
   } catch (error) {
     console.error("Failed to join as spectator:", error);
   }

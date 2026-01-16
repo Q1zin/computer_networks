@@ -7,6 +7,15 @@ pub struct GameInfo {
     pub player_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum Direction {
+    Up = 1,
+    Down = 2,
+    Left = 3,
+    Right = 4,
+}
+
 #[tauri::command]
 pub fn create_new_game(
     name: String,
@@ -14,15 +23,18 @@ pub fn create_new_game(
     height: u32,
     frequency: u32,
 ) -> Result<String, String> {
-    println!("Creating game: {} ({}x{}), frequency: {}ms", name, width, height, frequency);
-    
+    println!(
+        "Creating game: {} ({}x{}), frequency: {}ms",
+        name, width, height, frequency
+    );
+
     Ok(format!("Game '{}' created successfully", name))
 }
 
 #[tauri::command]
 pub fn get_available_games() -> Result<Vec<GameInfo>, String> {
     println!("Getting available games");
-    
+
     Ok(vec![
         GameInfo {
             name: "Быстрая игра #1".to_string(),
@@ -50,15 +62,43 @@ pub fn get_available_games() -> Result<Vec<GameInfo>, String> {
 #[tauri::command]
 pub fn join_game_as_player(game_name: String) -> Result<String, String> {
     println!("Joining game '{}' as player", game_name);
-    
+
     Ok(format!("Joined '{}' as player", game_name))
 }
 
 #[tauri::command]
 pub fn join_game_as_spectator(game_name: String) -> Result<String, String> {
     println!("Joining game '{}' as spectator", game_name);
-    
+
     Ok(format!("Joined '{}' as spectator", game_name))
+}
+
+#[tauri::command]
+pub fn send_steer(direction: Direction) -> Result<(), String> {
+    println!("Steering to: {:?}", direction);
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn leave_game() -> Result<(), String> {
+    println!("Leaving game");
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn become_spectator() -> Result<(), String> {
+    println!("Becoming spectator");
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_game_state() -> Result<String, String> {
+    println!("Getting game state");
+
+    Err("Not implemented yet".to_string())
 }
 
 #[tauri::command]

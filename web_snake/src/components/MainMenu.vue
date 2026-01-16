@@ -21,6 +21,13 @@ function closeNewGameMenu() {
   showNewGameMenu.value = false;
 }
 
+function onGameCreated() {
+  showNewGameMenu.value = false;
+  if ((window as any).startGame) {
+    (window as any).startGame("Моя игра");
+  }
+}
+
 async function exitApp() {
   try {
     await invoke("exit_app");
@@ -42,7 +49,7 @@ async function exitApp() {
         </button>
         
         <div v-if="showNewGameMenu" class="dropdown-panel">
-          <NewGameForm @close="closeNewGameMenu" />
+          <NewGameForm @close="closeNewGameMenu" @created="onGameCreated" />
         </div>
       </div>
 

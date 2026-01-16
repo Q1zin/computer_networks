@@ -6,6 +6,10 @@ use commands::{
     join_game_as_player,
     join_game_as_spectator,
     exit_app,
+    send_steer,
+    leave_game,
+    become_spectator,
+    get_game_state,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +22,10 @@ pub fn run() {
             join_game_as_player,
             join_game_as_spectator,
             exit_app,
+            send_steer,
+            leave_game,
+            become_spectator,
+            get_game_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

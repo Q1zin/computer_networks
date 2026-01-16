@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 const emit = defineEmits<{
   close: [];
+  created: [];
 }>();
 
 const gameName = ref("");
@@ -20,7 +21,7 @@ async function createGame() {
       frequency: updateFrequency.value,
     });
     console.log("Game created:", result);
-    emit("close");
+    emit("created");
   } catch (error) {
     console.error("Failed to create game:", error);
   }

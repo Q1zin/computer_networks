@@ -1,10 +1,27 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import MainMenu from "./components/MainMenu.vue";
+import GameView from "./components/GameView.vue";
+
+const currentView = ref<"menu" | "game">("menu");
+const currentGameName = ref<string>("");
+
+function startGame(gameName: string) {
+  currentGameName.value = gameName;
+  currentView.value = "game";
+}
+
+function returnToMenu() {
+  currentView.value = "menu";
+}
+
+(window as any).startGame = startGame;
 </script>
 
 <template>
   <main>
-    <MainMenu />
+    <MainMenu v-if="currentView === 'menu'" />
+    <GameView v-else-if="currentView === 'game'" @leave="returnToMenu" />
   </main>
 </template>
 
