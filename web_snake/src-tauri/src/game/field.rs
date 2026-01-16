@@ -59,19 +59,33 @@ impl FieldImpl {
         let head_direction = Direction::from_i32(proto.head_direction).unwrap_or(Direction::Up);
         let state = SnakeState::from_i32(proto.state).unwrap_or(SnakeState::Alive);
 
-        let mut body: Vec<Pos> = Vec::with_capacity(proto.points.len().max(2));
+        let mut body: Vec<Pos> = Vec::new();
         body.push(head);
 
-        let mut prev = head;
+        // Каждая последующая точка в proto.points — это суммарное смещение
+        // до следующей "ключевой" точки (изгиба). Нужно развернуть в отдельные клетки.
+        let mut current = head;
         for delta in proto.points.iter().skip(1) {
             let dx = delta.x.unwrap_or(0);
             let dy = delta.y.unwrap_or(0);
-            let next = Pos {
-                x: (prev.x + dx).rem_euclid(w),
-                y: (prev.y + dy).rem_euclid(h),
-            };
-            body.push(next);
-            prev = next;
+            
+            // Определяем направление и количество шагов
+            // dx и dy — это суммарное смещение, например (0, 5) означает 5 клеток вниз
+            let steps_x = dx.abs();
+            let steps_y = dy.abs();
+            let step_dx = if dx != 0 { dx.signum() } else { 0 };
+            let step_dy = if dy != 0 { dy.signum() } else { 0 };
+            
+            // Змейка движется либо по X, либо по Y (не диагонально)
+            let steps = steps_x.max(steps_y);
+            
+            for _ in 0..steps {
+                current = Pos {
+                    x: (current.x + step_dx).rem_euclid(w),
+                    y: (current.y + step_dy).rem_euclid(h),
+                };
+                body.push(current);
+            }
         }
 
         // Защита от некорректного снапшота: минимальная длина змейки — 2 клетки.
@@ -515,15 +529,58 @@ impl FieldImpl {
     }
 
     fn snake_to_proto(s: &SnakeModel, w: i32, h: i32) -> Snake {
-        let mut points = Vec::with_capacity(s.body.len());
+        // По протоколу: первая точка — абсолютные координаты головы,
+        // последующие точки — суммарные смещения до "ключевых" точек (изгибов).
+        // Например, змейка длиной 10, идущая прямо, кодируется как 2 точки:
+        // голова (x, y) и смещение (0, 9) до хвоста.
+        
+        let mut points = Vec::new();
         let head = s.body[0];
         points.push(Self::coord(head.x, head.y));
 
+        if s.body.len() < 2 {
+            return Snake {
+                player_id: s.player_id,
+                points,
+                state: s.state as i32,
+                head_direction: s.head_direction as i32,
+            };
+        }
+
+        // Группируем последовательные сегменты с одинаковым направлением
+        let mut accumulated_dx = 0i32;
+        let mut accumulated_dy = 0i32;
+        let mut prev_dir: Option<(i32, i32)> = None;
+
         for i in 1..s.body.len() {
-            let prev = s.body[i - 1];
-            let next = s.body[i];
-            let delta = Self::wrapped_delta(prev, next, w, h);
-            points.push(Self::coord(delta.x, delta.y));
+            let delta = Self::wrapped_delta(s.body[i - 1], s.body[i], w, h);
+            let current_dir = (delta.x.signum(), delta.y.signum());
+
+            match prev_dir {
+                None => {
+                    // Первый сегмент после головы
+                    accumulated_dx = delta.x;
+                    accumulated_dy = delta.y;
+                    prev_dir = Some(current_dir);
+                }
+                Some(pd) if pd == current_dir => {
+                    // То же направление — накапливаем
+                    accumulated_dx += delta.x;
+                    accumulated_dy += delta.y;
+                }
+                Some(_) => {
+                    // Направление изменилось — записываем накопленное смещение
+                    points.push(Self::coord(accumulated_dx, accumulated_dy));
+                    accumulated_dx = delta.x;
+                    accumulated_dy = delta.y;
+                    prev_dir = Some(current_dir);
+                }
+            }
+        }
+
+        // Записываем последнее накопленное смещение
+        if prev_dir.is_some() {
+            points.push(Self::coord(accumulated_dx, accumulated_dy));
         }
 
         Snake {
