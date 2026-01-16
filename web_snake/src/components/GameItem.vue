@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 interface Props {
   name: string;
   playerCount: number;
+  canJoin: boolean;
+  masterIp?: string;
+  masterPort?: number;
   isSelected: boolean;
 }
 
@@ -51,6 +54,9 @@ async function joinAsSpectator() {
       <div class="game-details">
         <strong class="game-name">{{ name }}</strong>
         <span class="player-count">{{ playerCount }} игроков</span>
+        <span v-if="masterIp && masterPort" class="server-info">
+          {{ masterIp }}:{{ masterPort }}
+        </span>
       </div>
       <div class="game-actions">
         <button 
@@ -120,6 +126,12 @@ async function joinAsSpectator() {
 .player-count {
   font-size: 13px;
   color: #a0aec0;
+}
+
+.server-info {
+  font-size: 12px;
+  color: #718096;
+  font-family: monospace;
 }
 
 .game-actions {

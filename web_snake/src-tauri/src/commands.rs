@@ -4,15 +4,6 @@ use crate::snakes::{GameConfig, GamePlayer, NodeRole, PlayerType};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[repr(i32)]
-pub enum Direction {
-    Up = 1,
-    Down = 2,
-    Left = 3,
-    Right = 4,
-}
-
 #[tauri::command]
 pub fn create_new_game(
     name: String,
@@ -47,13 +38,16 @@ pub fn create_new_game(
 
     // Создаем игру в GameManager
     game_manager
-        .create_game(config, host_player.clone())
+        .create_game(config.clone(), host_player.clone())
         .map_err(|e| e.to_string())?;
 
     // Инициализируем NetworkService как Master
     network
-        .init_as_master(host_player)
+        .init_as_master(name.clone(), config, host_player)
         .map_err(|e| e.to_string())?;
+
+    // Настраиваем обработчики сетевых событий (Join, Steer)
+    game_manager.setup_network_handlers(app.clone());
 
     // Запускаем игровой цикл
     game_manager.start_game_loop(app);
@@ -94,26 +88,26 @@ pub fn join_game_as_spectator(
 
 #[tauri::command]
 pub fn send_steer(
-    direction: Direction,
+    direction: i32,
     network: State<NetworkService>,
     game_manager: State<GameManager>,
 ) -> Result<(), String> {
-    println!("Steering to: {:?}", direction);
+    let dir = match direction {
+        1 => crate::snakes::Direction::Up,
+        2 => crate::snakes::Direction::Down,
+        3 => crate::snakes::Direction::Left,
+        4 => crate::snakes::Direction::Right,
+        _ => return Err(format!("Invalid direction: {}", direction)),
+    };
     
     // Добавляем поворот в очередь для локальной игры
     if let Some(player_id) = game_manager.my_player_id() {
-        let dir = match direction {
-            Direction::Up => crate::snakes::Direction::Up,
-            Direction::Down => crate::snakes::Direction::Down,
-            Direction::Left => crate::snakes::Direction::Left,
-            Direction::Right => crate::snakes::Direction::Right,
-        };
         game_manager.queue_steer(player_id, dir);
     }
     
     // Отправляем по сети
     network
-        .send_steer(direction as i32)
+        .send_steer(direction)
         .map_err(|e| e.to_string())
 }
 

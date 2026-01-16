@@ -4,7 +4,7 @@ pub mod udp_impl;
 use tauri::Emitter;
 use crate::game::state::{StateImpl, StateManager};
 use crate::snakes::{
-    game_message, game_message::RoleChangeMsg, GameAnnouncement, GameMessage, GamePlayer,
+    game_message, game_message::RoleChangeMsg, GameAnnouncement, GameConfig, GameMessage, GamePlayer,
     GamePlayers, GameState, NodeRole, PlayerType,
 };
 use anyhow::{anyhow, Result};
@@ -36,6 +36,8 @@ pub struct DiscoveredGameDto {
     pub players_count: usize,
     pub can_join: bool,
     pub master_address: String,
+    pub master_ip: Option<String>,
+    pub master_port: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -95,6 +97,8 @@ pub struct NetworkService {
     last_state: Arc<Mutex<Option<GameState>>>,
     state_manager: Arc<Mutex<Box<dyn StateManager>>>,
     players: Arc<Mutex<GamePlayers>>,
+    game_name: Arc<Mutex<String>>,
+    game_config: Arc<Mutex<Option<GameConfig>>>,
     running: Arc<AtomicBool>,
     seq: Arc<Mutex<i64>>,
 }
@@ -109,6 +113,8 @@ impl NetworkService {
             last_state: Arc::new(Mutex::new(None)),
             state_manager: Arc::new(Mutex::new(Box::new(StateImpl::new()))),
             players: Arc::new(Mutex::new(GamePlayers { players: vec![] })),
+            game_name: Arc::new(Mutex::new(String::new())),
+            game_config: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             seq: Arc::new(Mutex::new(0)),
         })
@@ -126,11 +132,15 @@ impl NetworkService {
         let state_manager = Arc::clone(&self.state_manager);
         let players = Arc::clone(&self.players);
         let running = Arc::clone(&self.running);
+        let game_name = Arc::clone(&self.game_name);
+        let game_config = Arc::clone(&self.game_config);
+        let seq = Arc::clone(&self.seq);
         let app_handle = app.clone();
 
         std::thread::spawn(move || {
             let mut last_timeout_check = Instant::now();
             let mut last_ping_check = Instant::now();
+            let mut last_announcement = Instant::now();
             
             while running.load(Ordering::SeqCst) {
                 match net.poll_receive() {
@@ -181,6 +191,87 @@ impl NetworkService {
                     drop(state_mgr);
                     last_ping_check = Instant::now();
                 }
+
+                // Периодически отправляем announcements (каждую секунду для Master)
+                if last_announcement.elapsed() > Duration::from_secs(1) {
+                    use crate::game::state::GameMode;
+                    
+                    let state_mgr = state_manager.lock().expect("state_manager mutex poisoned");
+                    let is_master = matches!(state_mgr.current_mode(), GameMode::InGame { role: NodeRole::Master, .. });
+                    drop(state_mgr);
+                    
+                    if is_master {
+                        let name_guard = game_name.lock().expect("game_name mutex poisoned");
+                        let game_name_str = name_guard.clone();
+                        drop(name_guard);
+                        
+                        if !game_name_str.is_empty() {
+                            let config_guard = game_config.lock().expect("game_config mutex poisoned");
+                            if let Some(config) = config_guard.as_ref() {
+                                let cfg = *config;
+                                drop(config_guard);
+                                
+                                // Отправляем announcement
+                                let local_addr = net.get_local_addr().ok();
+                                if let Some(addr) = local_addr {
+                                    let mut players_guard = players.lock().expect("players mutex poisoned");
+                                    let mut players_clone = players_guard.clone();
+                                    
+                                    // Заполняем IP и порт для Master
+                                    for p in &mut players_clone.players {
+                                        if p.role == NodeRole::Master as i32 {
+                                            let ip = if addr.ip().is_unspecified() {
+                                                "127.0.0.1".to_string()
+                                            } else {
+                                                addr.ip().to_string()
+                                            };
+                                            p.ip_address = Some(ip);
+                                            p.port = Some(addr.port() as i32);
+                                        }
+                                    }
+                                    drop(players_guard);
+                                    
+                                    // Фильтруем активных игроков
+                                    let active_players = GamePlayers {
+                                        players: players_clone.players
+                                            .into_iter()
+                                            .filter(|p| p.role != NodeRole::Viewer as i32)
+                                            .collect(),
+                                    };
+                                    
+                                    let announcement = crate::snakes::GameAnnouncement {
+                                        players: active_players,
+                                        config: cfg,
+                                        can_join: Some(true), // TODO: check is_full from GameManager
+                                        game_name: game_name_str,
+                                    };
+                                    
+                                    let msg_seq = {
+                                        let mut seq_guard = seq.lock().expect("seq mutex poisoned");
+                                        *seq_guard += 1;
+                                        *seq_guard
+                                    };
+                                    
+                                    let msg = crate::snakes::GameMessage {
+                                        msg_seq,
+                                        sender_id: None,
+                                        receiver_id: None,
+                                        r#type: Some(crate::snakes::game_message::Type::Announcement(
+                                            crate::snakes::game_message::AnnouncementMsg {
+                                                games: vec![announcement],
+                                            }
+                                        )),
+                                    };
+                                    
+                                    let _ = net.send_multicast(msg);
+                                    println!("Sent announcement");
+                                }
+                            }
+                        }
+                    }
+                    
+                    last_announcement = Instant::now();
+                }
             }
         });
     }
@@ -204,11 +295,19 @@ impl NetworkService {
         let games = self.discovered.lock().expect("discovered mutex poisoned");
         games
             .iter()
-            .map(|game| DiscoveredGameDto {
-                game_name: game.announcement.game_name.clone(),
-                players_count: game.announcement.players.players.len(),
-                can_join: game.announcement.can_join.unwrap_or(true),
-                master_address: game.master_address.to_string(),
+            .map(|game| {
+                // Находим мастера в списке игроков
+                let master = game.announcement.players.players.iter()
+                    .find(|p| p.role == NodeRole::Master as i32);
+                
+                DiscoveredGameDto {
+                    game_name: game.announcement.game_name.clone(),
+                    players_count: game.announcement.players.players.len(),
+                    can_join: game.announcement.can_join.unwrap_or(true),
+                    master_address: game.master_address.to_string(),
+                    master_ip: master.and_then(|m| m.ip_address.clone()),
+                    master_port: master.and_then(|m| m.port),
+                }
             })
             .collect()
     }
@@ -291,8 +390,11 @@ impl NetworkService {
         state.as_ref().map(game_state_to_dto)
     }
 
-    pub fn init_as_master(&self, initial_player: GamePlayer) -> Result<()> {
+    pub fn init_as_master(&self, game_name: String, config: GameConfig, initial_player: GamePlayer) -> Result<()> {
         use crate::game::state::GameMode;
+        
+        *self.game_name.lock().expect("game_name mutex poisoned") = game_name;
+        *self.game_config.lock().expect("game_config mutex poisoned") = Some(config);
         
         let mut players_guard = self.players.lock().expect("players mutex poisoned");
         players_guard.players = vec![initial_player];
@@ -321,6 +423,55 @@ impl NetworkService {
     pub fn my_player_id(&self) -> i32 {
         let state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
         state_mgr.my_id()
+    }
+
+    pub fn send_announcement(&self, game_name: String, config: &GameConfig, is_full: bool) -> Result<()> {
+        use crate::snakes::{GameAnnouncement, game_message::AnnouncementMsg};
+        
+        let local_addr = self.net.get_local_addr()?;
+        let mut players = self.players.lock().expect("players mutex poisoned").clone();
+        
+        // Заполняем IP и порт для Master в announcement
+        for p in &mut players.players {
+            if p.role == NodeRole::Master as i32 {
+                let ip = if local_addr.ip().is_unspecified() {
+                    "127.0.0.1".to_string()
+                } else {
+                    local_addr.ip().to_string()
+                };
+                p.ip_address = Some(ip);
+                p.port = Some(local_addr.port() as i32);
+            }
+        }
+
+        // Фильтруем только активных игроков (не Viewer)
+        let active_players = GamePlayers {
+            players: players.players
+                .into_iter()
+                .filter(|p| p.role != NodeRole::Viewer as i32)
+                .collect(),
+        };
+
+        let announcement = GameAnnouncement {
+            players: active_players,
+            config: *config,
+            can_join: Some(!is_full),
+            game_name,
+        };
+
+        let msg_seq = next_seq(&self.seq);
+        let msg = GameMessage {
+            msg_seq,
+            sender_id: None,
+            receiver_id: None,
+            r#type: Some(game_message::Type::Announcement(AnnouncementMsg {
+                games: vec![announcement],
+            })),
+        };
+
+        self.net.send_multicast(msg)?;
+        println!("Sent announcement");
+        Ok(())
     }
 
     fn find_master_addr(&self, game_name: &str) -> Result<SocketAddr> {
@@ -385,11 +536,19 @@ fn process_message(
             let payload = GamesDiscoveredDto {
                 games: games
                     .iter()
-                    .map(|game| DiscoveredGameDto {
-                        game_name: game.announcement.game_name.clone(),
-                        players_count: game.announcement.players.players.len(),
-                        can_join: game.announcement.can_join.unwrap_or(true),
-                        master_address: game.master_address.to_string(),
+                    .map(|game| {
+                        // Находим мастера в списке игроков
+                        let master = game.announcement.players.players.iter()
+                            .find(|p| p.role == NodeRole::Master as i32);
+                        
+                        DiscoveredGameDto {
+                            game_name: game.announcement.game_name.clone(),
+                            players_count: game.announcement.players.players.len(),
+                            can_join: game.announcement.can_join.unwrap_or(true),
+                            master_address: game.master_address.to_string(),
+                            master_ip: master.and_then(|m| m.ip_address.clone()),
+                            master_port: master.and_then(|m| m.port),
+                        }
                     })
                     .collect(),
             };
@@ -425,31 +584,61 @@ fn process_message(
     if let Err(e) = state_mgr.handle_message(msg.clone(), addr, &**net, &mut players_guard) {
         eprintln!("Error handling message: {}", e);
     }
-    drop(players_guard);
-    drop(state_mgr);
-
-    // Эмитим события для остальных типов сообщений
+    
+    // Эмитим события для типов сообщений, которые нужно обработать в GameManager
+    // Делаем это до drop, чтобы иметь доступ к state_mgr
     match msg.r#type.as_ref() {
+        Some(game_message::Type::Join(join_msg)) => {
+            // Join обрабатывается StateManager, который назначает ID
+            // Находим игрока по имени в текущем списке игроков
+            for player in &players_guard.players {
+                if player.name == join_msg.player_name {
+                    #[derive(Clone, serde::Serialize)]
+                    struct JoinEvent {
+                        player_name: String,
+                        player_id: i32,
+                    }
+                    let _ = app.emit("player-joined", JoinEvent {
+                        player_name: player.name.clone(),
+                        player_id: player.id,
+                    });
+                    break;
+                }
+            }
+        }
+        Some(game_message::Type::Steer(steer_msg)) => {
+            // Эмитим событие для обработки в GameManager
+            #[derive(Clone, serde::Serialize)]
+            struct SteerEvent {
+                player_id: i32,
+                direction: i32,
+            }
+            if let Some(sender_id) = msg.sender_id {
+                let _ = app.emit("player-steered", SteerEvent {
+                    player_id: sender_id,
+                    direction: steer_msg.direction,
+                });
+            }
+        }
         Some(game_message::Type::Error(error_msg)) => {
             let _ = app.emit("game-error", error_msg.error_message.clone());
         }
-        Some(game_message::Type::Join(_)) => {
-            let _ = app.emit("network-event", "join");
+        _ => {
+            // Остальные события эмитим как общие network-event
+            if let Some(msg_type) = msg.r#type.as_ref() {
+                let event_name = match msg_type {
+                    game_message::Type::Ping(_) => "ping",
+                    game_message::Type::Ack(_) => "ack",
+                    game_message::Type::RoleChange(_) => "role-change",
+                    _ => return,
+                };
+                let _ = app.emit("network-event", event_name);
+            }
         }
-        Some(game_message::Type::Ping(_)) => {
-            let _ = app.emit("network-event", "ping");
-        }
-        Some(game_message::Type::Ack(_)) => {
-            let _ = app.emit("network-event", "ack");
-        }
-        Some(game_message::Type::Steer(_)) => {
-            let _ = app.emit("network-event", "steer");
-        }
-        Some(game_message::Type::RoleChange(_)) => {
-            let _ = app.emit("network-event", "role-change");
-        }
-        _ => {}
     }
+    
+    drop(players_guard);
+    drop(state_mgr);
 }
 
 pub fn game_state_to_dto(state: &GameState) -> GameStateDto {

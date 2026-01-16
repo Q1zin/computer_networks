@@ -5,8 +5,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import GameItem from "./GameItem.vue";
 
 interface GameInfo {
-  name: string;
-  playerCount: number;
+  gameName: string;
+  playersCount: number;
+  canJoin: boolean;
+  masterAddress: string;
+  masterIp?: string;
+  masterPort?: number;
+}
+
+interface GamesDiscoveredPayload {
+  games: GameInfo[];
 }
 
 const availableGames = ref<GameInfo[]>([]);
@@ -28,9 +36,9 @@ function selectGame(name: string) {
 }
 
 onMounted(async () => {
-  unlisten = await listen<GameInfo[]>("games-discovered", (event) => {
+  unlisten = await listen<GamesDiscoveredPayload>("games-discovered", (event) => {
     console.log("Games discovered:", event.payload);
-    availableGames.value = event.payload;
+    availableGames.value = event.payload.games;
   });
 
   refreshGameList();
@@ -55,10 +63,13 @@ onUnmounted(() => {
     <div class="games-list">
       <GameItem
         v-for="game in availableGames"
-        :key="game.name"
-        :name="game.name"
-        :player-count="game.playerCount"
-        :is-selected="selectedGame === game.name"
+        :key="game.gameName"
+        :name="game.gameName"
+        :player-count="game.playersCount"
+        :can-join="game.canJoin"
+        :master-ip="game.masterIp"
+        :master-port="game.masterPort"
+        :is-selected="selectedGame === game.gameName"
         @select="selectGame"
       />
       

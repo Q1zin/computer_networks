@@ -3,12 +3,10 @@ use crate::network::game_state_to_dto;
 use crate::snakes::{Direction, GameConfig, GamePlayers, GameState, GamePlayer};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Listener, Emitter};
 
 pub struct GameManager {
     field: Arc<Mutex<Option<FieldImpl>>>,
@@ -33,6 +31,7 @@ impl GameManager {
 
     /// Создание новой игры (для Master)
     pub fn create_game(&self, config: GameConfig, host_player: GamePlayer) -> Result<()> {
+        let player_id = host_player.id;
         let players = GamePlayers {
             players: vec![host_player],
         };
@@ -40,6 +39,7 @@ impl GameManager {
         let field = FieldImpl::new(config.clone(), players);
         *self.field.lock().unwrap() = Some(field);
         *self.config.lock().unwrap() = Some(config);
+        *self.my_player_id.lock().unwrap() = Some(player_id);
         Ok(())
     }
 
@@ -130,6 +130,7 @@ impl GameManager {
         let last_tick = Arc::clone(&self.last_tick);
         let running = Arc::clone(&self.running);
         let config = Arc::clone(&self.config);
+        let app_clone = app.clone();
 
         std::thread::spawn(move || {
             while running.load(Ordering::SeqCst) {
@@ -157,7 +158,7 @@ impl GameManager {
                             Ok(new_state) => {
                                 // Отправляем State через event используя DTO
                                 let state_dto = game_state_to_dto(&new_state);
-                                let _ = app.emit("game-state", state_dto);
+                                let _ = app_clone.emit("game-state", state_dto);
                             }
                             Err(e) => {
                                 eprintln!("Game update error: {}", e);
@@ -169,6 +170,45 @@ impl GameManager {
                 }
 
                 std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
+
+    /// Настройка обработчиков сетевых событий для Master
+    pub fn setup_network_handlers(&self, app: AppHandle) {
+        let field_for_join = Arc::clone(&self.field);
+        let pending_steers_for_steer = Arc::clone(&self.pending_steers);
+
+        // Подписываемся на событие player-joined для добавления игроков
+        app.listen("player-joined", move |event| {
+            #[derive(serde::Deserialize)]
+            struct JoinEvent {
+                player_name: String,
+                player_id: i32,
+            }
+            
+            if let Ok(join_event) = serde_json::from_str::<JoinEvent>(event.payload()) {
+                let mut field_guard = field_for_join.lock().unwrap();
+                if let Some(field) = field_guard.as_mut() {
+                    let _ = field.place_new_snake(join_event.player_name);
+                }
+            }
+        });
+
+        // Подписываемся на событие player-steered для обработки управления
+        app.listen("player-steered", move |event| {
+            #[derive(serde::Deserialize)]
+            struct SteerEvent {
+                player_id: i32,
+                direction: i32,
+            }
+            
+            if let Ok(steer_event) = serde_json::from_str::<SteerEvent>(event.payload()) {
+                let direction = crate::snakes::Direction::try_from(steer_event.direction);
+                if let Ok(dir) = direction {
+                    let mut steers_guard = pending_steers_for_steer.lock().unwrap();
+                    steers_guard.insert(steer_event.player_id, dir);
+                }
             }
         });
     }
