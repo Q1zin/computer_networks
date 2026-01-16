@@ -591,7 +591,7 @@ impl StateManager for StateImpl {
                     if let GameMode::InGame {
                         role: my_role,
                         master_addr: _,
-                        deputy_id: cur_dep,
+                        deputy_id: _,
                     } = self.mode.clone()
                     {
                         let effective_role = match my_role {
@@ -603,10 +603,12 @@ impl StateManager for StateImpl {
                             net.set_role(effective_role);
                         }
 
+                        // Сбрасываем deputy_id при смене master - новый deputy будет назначен
+                        // новым master и придёт в следующем State
                         self.mode = GameMode::InGame {
                             role: effective_role,
                             master_addr: Some(new_master_addr),
-                            deputy_id: cur_dep,
+                            deputy_id: None,
                         };
                     }
                 }
@@ -883,29 +885,48 @@ impl StateManager for StateImpl {
                             && (dropped_role == Some(NodeRole::Master as i32)
                                 || (dropped_addr.is_some() && dropped_addr == master_addr));
 
-                        if master_disappeared {
-                            let dep_id = deputy_id.or_else(|| {
-                                players
-                                    .players
-                                    .iter()
-                                    .find(|p| p.role == NodeRole::Deputy as i32)
-                                    .map(|p| p.id)
-                            });
+                        println!("[check_timeouts/Viewer] dropped_id={}, dropped_role={:?}, dropped_addr={:?}, master_addr={:?}, master_disappeared={}",
+                            id, dropped_role, dropped_addr, master_addr, master_disappeared);
+                        println!("[check_timeouts/Viewer] known_players={:?}", self.known_players.keys().collect::<Vec<_>>());
+                        println!("[check_timeouts/Viewer] players={:?}", players.players.iter().map(|p| (p.id, p.role, p.ip_address.as_ref(), p.port)).collect::<Vec<_>>());
 
-                            if let Some(dep_id) = dep_id {
-                                if let Some(dep_addr) = self.known_players.get(&dep_id).map(|e| e.1)
-                                {
-                                    self.mode = GameMode::InGame {
-                                        role: NodeRole::Viewer,
-                                        master_addr: Some(dep_addr),
-                                        deputy_id: Some(dep_id),
-                                    };
-                                    self.last_send_times.insert(dep_addr, now);
-                                }
+                        if master_disappeared {
+                            // Ищем нового Master или Deputy среди известных живых игроков.
+                            // Приоритет: 
+                            // 1. Игрок с ролью Master в known_players (новый master уже сообщил о себе)
+                            // 2. Игрок с ролью Deputy в known_players (бывший deputy, теперь master)
+                            // 3. Любой не-Viewer игрок в known_players
+                            
+                            let new_master_from_known = self.known_players.iter()
+                                .find(|(_, (p, _, _))| p.role == NodeRole::Master as i32)
+                                .map(|(id, (_, addr, _))| (*id, *addr));
+                            
+                            let deputy_from_known = self.known_players.iter()
+                                .find(|(_, (p, _, _))| p.role == NodeRole::Deputy as i32)
+                                .map(|(id, (_, addr, _))| (*id, *addr));
+                            
+                            let any_active_from_known = self.known_players.iter()
+                                .find(|(id, (p, _, _))| p.role != NodeRole::Viewer as i32 && **id != self.my_id)
+                                .map(|(id, (_, addr, _))| (*id, *addr));
+
+                            let candidate = new_master_from_known
+                                .or(deputy_from_known)
+                                .or(any_active_from_known);
+
+                            println!("[check_timeouts/Viewer] Looking for new master, candidate={:?}", candidate);
+
+                            if let Some((new_master_id, new_master_addr)) = candidate {
+                                println!("[check_timeouts/Viewer] Switching to new master id={} at {}", new_master_id, new_master_addr);
+                                self.mode = GameMode::InGame {
+                                    role: NodeRole::Viewer,
+                                    master_addr: Some(new_master_addr),
+                                    deputy_id: None, // будет обновлено из следующего State
+                                };
+                                self.last_send_times.insert(new_master_addr, now);
                             } else {
-                                // Нет deputy - игра завершается, выходим в lobby
-                                println!("[check_timeouts] Master gone, no deputy - game over, returning to lobby");
-                                let _ = app.emit("game-over", "No master or deputy available");
+                                // Нет живых игроков кроме нас - игра завершена
+                                println!("[check_timeouts] Master gone, no other players available - game over, returning to lobby");
+                                let _ = app.emit("game-over", "No other players available");
                                 self.mode = GameMode::Lobby;
                                 self.known_players.clear();
                                 self.removed_players.clear();
