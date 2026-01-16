@@ -101,6 +101,7 @@ impl StateManager for StateImpl {
                 self.my_id = 0;
                 self.known_players.clear();
                 self.last_send_times.clear();
+                self.seq_counter = 0;
                 Ok(())
             }
 

@@ -19,6 +19,11 @@ pub fn create_new_game(
         name, width, height, frequency
     );
 
+    // Важное: при создании новой игры в том же процессе нужно сбросить хвосты прошлой
+    // сессии (накопленные змейки, last_state в UI, прошлый my_id и т.п.).
+    game_manager.reset();
+    network.reset_local_session().map_err(|e| e.to_string())?;
+
     let config = GameConfig {
         width: Some(width as i32),
         height: Some(height as i32),

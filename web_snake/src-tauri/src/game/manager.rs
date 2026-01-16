@@ -15,6 +15,7 @@ pub struct GameManager {
     last_tick: Arc<Mutex<Instant>>,
     running: Arc<AtomicBool>,
     config: Arc<Mutex<Option<GameConfig>>>,
+    handlers_registered: AtomicBool,
 }
 
 impl GameManager {
@@ -26,6 +27,7 @@ impl GameManager {
             last_tick: Arc::new(Mutex::new(Instant::now())),
             running: Arc::new(AtomicBool::new(false)),
             config: Arc::new(Mutex::new(None)),
+            handlers_registered: AtomicBool::new(false),
         }
     }
 
@@ -265,6 +267,13 @@ impl GameManager {
 
     /// Настройка обработчиков сетевых событий для Master
     pub fn setup_network_handlers(&self, app: AppHandle) {
+        if self.handlers_registered.swap(true, Ordering::SeqCst) {
+            // Эти обработчики должны регистрироваться один раз на всё приложение.
+            // Иначе при create_new_game() будет накапливаться несколько слушателей,
+            // и на один join/steer появятся дубликаты змей.
+            return;
+        }
+
         let field_for_join = Arc::clone(&self.field);
         let field_for_left = Arc::clone(&self.field);
         let pending_steers_for_steer = Arc::clone(&self.pending_steers);

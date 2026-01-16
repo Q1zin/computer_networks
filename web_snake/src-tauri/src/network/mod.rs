@@ -340,6 +340,10 @@ impl NetworkService {
         player_name: &str,
         requested_role: NodeRole,
     ) -> Result<()> {
+        // Защита от "восстановления" старого State в UI: перед входом
+        // сбрасываем локальные кеши предыдущей сессии.
+        self.reset_local_session()?;
+
         let master_addr = self.find_master_addr(game_name)?;
 
         let join_msg = GameMessage {
@@ -407,11 +411,34 @@ impl NetworkService {
         }
 
         // Локально сбрасываем состояние в Lobby: перестаём пинговать и обнуляем топологию.
-        let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
-        state_mgr.transition(GameMode::Lobby, &*self.net)?;
-        drop(state_mgr);
+        self.reset_local_session()?;
 
+        // После reset_local_session мы уже в Lobby и current_master сброшен.
+        // Роль оставляем VIEWER, чтобы не слать игровые сообщения.
+        Ok(())
+    }
+
+    /// Полный локальный сброс сессии (без остановки polling-треда).
+    /// Нужен, чтобы новая игра не «подхватывала» кеши старой (last_state/players/my_id/etc.).
+    pub fn reset_local_session(&self) -> Result<()> {
+        use crate::game::state::GameMode;
+
+        // Сбрасываем state machine
+        {
+            let mut state_mgr = self.state_manager.lock().expect("state_manager mutex poisoned");
+            state_mgr.transition(GameMode::Lobby, &*self.net)?;
+        }
+
+        // Сбрасываем ссылки на мастера
         *self.current_master.lock().expect("master mutex poisoned") = None;
+
+        // Очищаем локальные кеши, которые используются UI (иначе get_game_state вернёт старое)
+        *self.last_state.lock().expect("state mutex poisoned") = None;
+        self.players.lock().expect("players mutex poisoned").players.clear();
+        *self.game_name.lock().expect("game_name mutex poisoned") = String::new();
+        *self.game_config.lock().expect("game_config mutex poisoned") = None;
+
+        // Переходим в роль VIEWER по умолчанию
         self.net.set_role(NodeRole::Viewer);
         Ok(())
     }
