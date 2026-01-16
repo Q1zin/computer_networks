@@ -935,23 +935,31 @@ impl NetworkService {
         let known_players = state_mgr.get_known_players();
         drop(state_mgr);
 
-        // Debug: показываем куда будем слать
-        static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let cnt = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if cnt < 3 {
-            println!("[broadcast_state] known_players count={}, ids: {:?}", 
-                known_players.len(), 
-                known_players.iter().map(|(id, addr)| (*id, addr.to_string())).collect::<Vec<_>>());
-        }
-
         // Важно: роли (в т.ч. DEPUTY) определяются сетевым state_manager/players,
         // а не игровым Field. Поэтому перед рассылкой накладываем meta (role/ip/port) на State.
         let mut state_to_send = state.clone();
         let players_snapshot = self.players.lock().expect("players mutex poisoned").clone();
         overlay_player_meta_from_players(&mut state_to_send, &players_snapshot);
 
-        // У мастера собственный ip/port в players может быть None (он сам себе сообщений не шлёт).
-        // Но это критично для takeover: deputy должен знать адрес старого мастера и адреса всех узлов.
+        // КРИТИЧНО для deputy takeover: Master должен включать ip/port ВСЕХ игроков в State,
+        // иначе deputy при takeover не знает куда слать State и RoleChange.
+        // Берём адреса из known_players и добавляем в State.
+        for (player_id, addr) in &known_players {
+            for p in &mut state_to_send.players.players {
+                if p.id == *player_id {
+                    if p.ip_address.is_none() {
+                        p.ip_address = Some(addr.ip().to_string());
+                    }
+                    if p.port.is_none() {
+                        p.port = Some(addr.port() as i32);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Дополнительно: собственный ip/port Master'а (он сам себе сообщений не шлёт, поэтому
+        // его нет в known_players как отправителя).
         if let Ok(local_addr) = self.net.get_local_addr() {
             let ip = if local_addr.ip().is_unspecified() {
                 "127.0.0.1".to_string()
