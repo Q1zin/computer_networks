@@ -1427,23 +1427,33 @@ fn process_message(
     // Делаем это до drop, чтобы иметь доступ к state_mgr
     match msg.r#type.as_ref() {
         Some(game_message::Type::Join(join_msg)) => {
-            // Join обрабатывается StateManager, который назначает ID
-            // Находим игрока по имени в текущем списке игроков
-            for player in &players_guard.players {
-                if player.name == join_msg.player_name {
-                    // Эмитим событие только для игроков (не для зрителей)
-                    if player.role != NodeRole::Viewer as i32 {
-                        #[derive(Clone, serde::Serialize)]
-                        struct JoinEvent {
-                            player_name: String,
-                            player_id: i32,
-                        }
-                        let _ = app.emit("player-joined", JoinEvent {
+            // Join обрабатывается StateManager, который назначает ID.
+            // Важно: не ищем игрока только по имени (имена могут совпадать),
+            // сначала пытаемся сопоставить по реальному адресу отправителя.
+            let addr_ip = addr.ip().to_string();
+            let addr_port = addr.port() as i32;
+
+            let player_opt = players_guard
+                .players
+                .iter()
+                .find(|p| p.ip_address.as_deref() == Some(addr_ip.as_str()) && p.port == Some(addr_port))
+                .or_else(|| players_guard.players.iter().find(|p| p.name == join_msg.player_name));
+
+            if let Some(player) = player_opt {
+                // Эмитим событие только для игроков (не для зрителей)
+                if player.role != NodeRole::Viewer as i32 {
+                    #[derive(Clone, serde::Serialize)]
+                    struct JoinEvent {
+                        player_name: String,
+                        player_id: i32,
+                    }
+                    let _ = app.emit(
+                        "player-joined",
+                        JoinEvent {
                             player_name: player.name.clone(),
                             player_id: player.id,
-                        });
-                    }
-                    break;
+                        },
+                    );
                 }
             }
         }

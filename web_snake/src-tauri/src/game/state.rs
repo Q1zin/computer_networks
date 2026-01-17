@@ -301,6 +301,49 @@ impl StateManager for StateImpl {
                 },
                 Some(game_message::Type::Join(join)),
             ) => {
+                // Idempotent handling: if this sender already has a player, just re-ACK without spawning a duplicate
+                if let Some((existing_id, entry)) = self
+                    .known_players
+                    .iter_mut()
+                    .find(|(id, (_, addr, _))| *addr == sender && !self.removed_players.contains(id))
+                {
+                    entry.0.name = join.player_name.clone();
+                    entry.0.role = join.requested_role;
+                    entry.0.r#type = join.player_type;
+                    entry.0.ip_address = Some(sender.ip().to_string());
+                    entry.0.port = Some(sender.port() as i32);
+                    entry.2 = Instant::now();
+
+                    if let Some(p) = players.players.iter_mut().find(|p| p.id == *existing_id) {
+                        p.name = join.player_name.clone();
+                        p.role = join.requested_role;
+                        p.r#type = join.player_type;
+                        p.ip_address = Some(sender.ip().to_string());
+                        p.port = Some(sender.port() as i32);
+                    } else {
+                        players.players.push(GamePlayer {
+                            name: join.player_name.clone(),
+                            id: *existing_id,
+                            ip_address: Some(sender.ip().to_string()),
+                            port: Some(sender.port() as i32),
+                            role: join.requested_role,
+                            r#type: join.player_type,
+                            score: 0,
+                        });
+                    }
+
+                    let ack = GameMessage {
+                        msg_seq: msg.msg_seq,
+                        sender_id: Some(self.my_id),
+                        receiver_id: Some(*existing_id),
+                        r#type: Some(game_message::Type::Ack(AckMsg {})),
+                    };
+                    net.send_unicast(sender, ack)?;
+                    self.last_send_times.insert(sender, Instant::now());
+                    ack_already_sent = true;
+                    return Ok(());
+                }
+
                 // По ТЗ: Viewer может присоединиться всегда, а для NORMAL нужно проверить место на поле
                 let wants_to_play = join.requested_role != NodeRole::Viewer as i32;
                 

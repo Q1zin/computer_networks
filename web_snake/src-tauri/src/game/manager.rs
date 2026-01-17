@@ -386,12 +386,13 @@ impl GameManager {
             #[derive(serde::Deserialize)]
             struct JoinEvent {
                 player_name: String,
+                player_id: i32,
             }
             
             if let Ok(join_event) = serde_json::from_str::<JoinEvent>(event.payload()) {
                 let mut field_guard = field_for_join.lock().unwrap();
                 if let Some(field) = field_guard.as_mut() {
-                    let _ = field.place_new_snake(join_event.player_name);
+                    let _ = field.place_new_snake_with_id(join_event.player_id, join_event.player_name);
                 }
             }
         });

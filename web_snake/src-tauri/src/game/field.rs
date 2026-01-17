@@ -523,6 +523,80 @@ impl GameField for FieldImpl {
 }
 
 impl FieldImpl {
+    pub fn place_new_snake_with_id(&mut self, player_id: i32, player_name: String) -> Result<i32> {
+        if player_id <= 0 {
+            return Err(anyhow!("Invalid player_id for new snake"));
+        }
+
+        // Idempotency: if snake already exists for this player, do not spawn a duplicate.
+        if self.snakes.contains_key(&player_id) {
+            if let Some(p) = self.players.players.iter_mut().find(|p| p.id == player_id) {
+                if !player_name.trim().is_empty() {
+                    p.name = player_name;
+                }
+            }
+            return Ok(player_id);
+        }
+
+        // Ensure player exists in roster (do not overwrite network-provided role/ip/port if present)
+        if !self.players.players.iter().any(|p| p.id == player_id) {
+            self.players.players.push(GamePlayer {
+                name: player_name.clone(),
+                id: player_id,
+                ip_address: None,
+                port: None,
+                role: NodeRole::Normal as i32,
+                r#type: None,
+                score: 0,
+            });
+        } else if let Some(p) = self.players.players.iter_mut().find(|p| p.id == player_id) {
+            if !player_name.trim().is_empty() {
+                p.name = player_name.clone();
+            }
+        }
+
+        let occupied = self.occupied_cells();
+
+        for cy in 0..self.height {
+            for cx in 0..self.width {
+                if !Self::is_5x5_snake_free(&occupied, cx, cy, self.width, self.height) {
+                    continue;
+                }
+
+                let head = Pos { x: cx, y: cy };
+                if self.foods.contains(&head) {
+                    continue;
+                }
+
+                let mut dirs = [
+                    Direction::Up,
+                    Direction::Down,
+                    Direction::Left,
+                    Direction::Right,
+                ];
+                dirs.shuffle(&mut self.rng);
+
+                for tail_dir in dirs {
+                    let tail = Self::step(head, tail_dir, self.width, self.height);
+                    if occupied.contains(&tail) || self.foods.contains(&tail) {
+                        continue;
+                    }
+
+                    let snake = SnakeModel {
+                        player_id,
+                        body: vec![head, tail],
+                        state: SnakeState::Alive,
+                        head_direction: Self::opposite_dir(tail_dir),
+                    };
+                    self.snakes.insert(player_id, snake);
+                    return Ok(player_id);
+                }
+            }
+        }
+
+        Err(anyhow!("No space for new snake"))
+    }
+
     fn coord(x: i32, y: i32) -> Coord {
         Coord {
             x: Some(x),
