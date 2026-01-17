@@ -69,6 +69,10 @@ pub struct StateImpl {
     removed_players: std::collections::HashSet<i32>, // Игроки, которые вышли из игры
     last_send_times: HashMap<SocketAddr, Instant>,
     seq_counter: i64,
+    last_delay_ms: u32,
+    /// После смены мастера даём сети время стабилизироваться (UDP/таймауты на клиентах),
+    /// чтобы новый мастер не «выкинул» живых игроков раньше, чем они переключатся.
+    master_takeover_grace_until: Option<Instant>,
 }
 
 impl StateImpl {
@@ -80,6 +84,27 @@ impl StateImpl {
             removed_players: std::collections::HashSet::new(),
             last_send_times: HashMap::new(),
             seq_counter: 0,
+            last_delay_ms: 1000,
+            master_takeover_grace_until: None,
+        }
+    }
+
+    fn enter_master_takeover_grace(&mut self, delay_ms: u32) {
+        let delay_ms = delay_ms.max(1) as u64;
+        // Клиенты (NORMAL/VIEWER) могут обнаружить пропажу старого мастера только по таймауту
+        // (см. check_timeouts: ~3*delay). Поэтому новому мастеру важно подождать минимум
+        // один такой «окно-таймаут», иначе он начнёт дропать живых игроков.
+        let grace = Duration::from_millis(delay_ms * 4);
+        self.master_takeover_grace_until = Some(Instant::now() + grace);
+    }
+
+    fn refresh_all_known_last_seen(&mut self) {
+        let now = Instant::now();
+        for (id, (_p, _addr, last_seen)) in self.known_players.iter_mut() {
+            if self.my_id != 0 && *id == self.my_id {
+                continue;
+            }
+            *last_seen = now;
         }
     }
 
@@ -192,6 +217,7 @@ impl StateManager for StateImpl {
                 self.removed_players.clear();
                 self.last_send_times.clear();
                 self.seq_counter = 0;
+                self.master_takeover_grace_until = None;
                 Ok(())
             }
 
@@ -237,10 +263,12 @@ impl StateManager for StateImpl {
                     master_addr,
                     deputy_id,
                 };
+                self.master_takeover_grace_until = None;
                 net.set_role(NodeRole::Viewer);
             }
             _ => {
                 self.mode = GameMode::Viewer;
+                self.master_takeover_grace_until = None;
                 net.set_role(NodeRole::Viewer);
             }
         }
@@ -340,7 +368,6 @@ impl StateManager for StateImpl {
                     };
                     net.send_unicast(sender, ack)?;
                     self.last_send_times.insert(sender, Instant::now());
-                    ack_already_sent = true;
                     return Ok(());
                 }
 
@@ -633,12 +660,22 @@ impl StateManager for StateImpl {
                                     }
                                 }
 
+                                // КРИТИЧНО: при takeover новый мастер должен знать адреса всех игроков,
+                                // иначе он не сможет начать рассылку State и клиенты «зависнут».
+                                // Берём ip/port из players (они приходили в State) и подмешиваем в known_players.
+                                self.observe_players(players);
+
                                 self.mode = GameMode::InGame {
                                     role: NodeRole::Master,
                                     master_addr: None,
                                     deputy_id: new_dep,
                                 };
                                 net.set_role(NodeRole::Master);
+
+                                // Даём время остальным узлам переключиться на нового мастера.
+                                // Это предотвращает «массовый timeout» и превращение живых змей в zombie.
+                                self.enter_master_takeover_grace(self.last_delay_ms);
+                                self.refresh_all_known_last_seen();
                                 return Ok(());
                             }
                         }
@@ -721,16 +758,46 @@ impl StateManager for StateImpl {
         players: &mut GamePlayers,
         app: &tauri::AppHandle,
     ) -> Result<()> {
-        let timeout = Duration::from_millis(((delay_ms as u64) * 8) / 10);
+        self.last_delay_ms = delay_ms.max(1);
+        let timeout = Duration::from_millis((delay_ms as u64) * 3);
         let mut dropouts = Vec::new();
         let now = Instant::now();
 
-        for (id, (_, _, last_seen)) in &self.known_players {
+        // Если мы только что стали MASTER (handoff/failover), не таймаутим игроков некоторое время.
+        // Иначе новый MASTER может удалить живых игроков раньше, чем они узнают про смену мастера.
+        if matches!(self.mode, GameMode::InGame { role: NodeRole::Master, .. }) {
+            if let Some(until) = self.master_takeover_grace_until {
+                if now < until {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Важно: не-MASTER узлы не получают регулярный трафик от NORMAL'ов.
+        // Единственный надёжный таймаут для них — текущий master_addr (мастер или deputy после свитча).
+        let watch_master_addr: Option<SocketAddr> = match self.mode.clone() {
+            GameMode::InGame {
+                role: NodeRole::Master,
+                ..
+            } => None,
+            GameMode::InGame { master_addr, .. } => master_addr,
+            _ => None,
+        };
+
+        for (id, (_, addr, last_seen)) in &self.known_players {
             // Себя никогда не таймаутим: иначе при редких входящих пакетах можно
             // случайно превратиться в VIEWER и начать слать себе ping/ack.
             if self.my_id != 0 && *id == self.my_id {
                 continue;
             }
+
+            if let Some(watch) = watch_master_addr {
+                // Для не-master: таймаутим только текущего мастера (по адресу).
+                if *addr != watch {
+                    continue;
+                }
+            }
+
             if now.duration_since(*last_seen) > timeout {
                 dropouts.push(*id);
             }
@@ -858,6 +925,15 @@ impl StateManager for StateImpl {
                             };
                             net.set_role(NodeRole::Master);
 
+                            // Как и в handoff: сразу подмешиваем адреса игроков из players,
+                            // чтобы новый мастер мог слать State без ожидания пингов.
+                            self.observe_players(players);
+
+                            // Новый мастер: даём «grace period», чтобы NORMAL/VIEWER успели
+                            // переключиться с отвалившегося master на нас и начать слать ACK/Steer.
+                            self.enter_master_takeover_grace(delay_ms);
+                            self.refresh_all_known_last_seen();
+
                             // Обновляем роли в players: мы теперь MASTER, новый deputy (если есть).
                             for p in &mut players.players {
                                 if p.id == self.my_id {
@@ -917,8 +993,44 @@ impl StateManager for StateImpl {
                             });
 
                             if let Some(dep_id) = dep_id {
-                                if let Some(dep_addr) = self.known_players.get(&dep_id).map(|e| e.1)
-                                {
+                                let dep_addr = self.known_players.get(&dep_id).map(|e| e.1).or_else(|| {
+                                    // Если по какой-то причине deputy не был в known_players,
+                                    // пробуем взять адрес из players (он приходит в State).
+                                    players
+                                        .players
+                                        .iter()
+                                        .find(|p| p.id == dep_id)
+                                        .and_then(|p| {
+                                            let ip = p.ip_address.as_ref()?;
+                                            let port = p.port?;
+                                            format!("{}:{}", ip, port).parse::<SocketAddr>().ok()
+                                        })
+                                });
+
+                                if let Some(dep_addr) = dep_addr {
+                                    // Заодно фиксируем deputy в known_players, чтобы дальше всё работало стабильно.
+                                    self.known_players
+                                        .entry(dep_id)
+                                        .and_modify(|e| {
+                                            e.1 = dep_addr;
+                                            e.2 = now;
+                                        })
+                                        .or_insert_with(|| {
+                                            (
+                                                GamePlayer {
+                                                    name: String::new(),
+                                                    id: dep_id,
+                                                    ip_address: Some(dep_addr.ip().to_string()),
+                                                    port: Some(dep_addr.port() as i32),
+                                                    role: NodeRole::Deputy as i32,
+                                                    r#type: None,
+                                                    score: 0,
+                                                },
+                                                dep_addr,
+                                                now,
+                                            )
+                                        });
+
                                     self.mode = GameMode::InGame {
                                         role: NodeRole::Normal,
                                         master_addr: Some(dep_addr),
@@ -997,6 +1109,7 @@ impl StateManager for StateImpl {
     }
 
     fn send_ping_if_needed(&mut self, delay_ms: u32, net: &dyn NetworkProtocol) -> Result<()> {
+        self.last_delay_ms = delay_ms.max(1);
         // По протоколу: если не отправляли никаких unicast-сообщений узлу
         // в течение state_delay_ms / 10, необходимо отправить PingMsg.
         // Это касается ВСЕХ узлов (Master, Deputy, Normal, Viewer).

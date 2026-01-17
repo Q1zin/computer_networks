@@ -55,7 +55,7 @@ pub fn run() {
                     let network = app_async.state::<NetworkService>();
                     let game_manager = app_async.state::<GameManager>();
 
-                    let snapshot = match network.latest_state_raw() {
+                    let mut snapshot = match network.latest_state_raw() {
                         Some(s) => {
                             println!("[became-master] Got snapshot with state_order={}", s.state_order);
                             s
@@ -65,6 +65,17 @@ pub fn run() {
                             return;
                         }
                     };
+
+                    // КРИТИЧНО: обновляем роли в snapshot из актуального NetworkService.players,
+                    // чтобы Field получил правильные роли (новый master, новый deputy, и т.д.)
+                    let current_players = network.get_players();
+                    for p in &mut snapshot.players.players {
+                        if let Some(updated) = current_players.players.iter().find(|cp| cp.id == p.id) {
+                            p.role = updated.role;
+                        }
+                    }
+                    // Также синхронизируем players из NetworkService (там может быть актуальнее)
+                    snapshot.players = current_players;
 
                     let config = network.current_game_config_raw().unwrap_or(crate::snakes::GameConfig {
                         width: Some(40),

@@ -301,6 +301,14 @@ impl GameManager {
                                 if !my_snake_alive && my_id != 0 {
                                     // Змейка master'а умерла - нужно стать viewer и передать роль deputy
                                     println!("[game-loop-net] Master's snake died! Becoming spectator...");
+
+                                    // ВАЖНО: перед handoff отправляем финальный State, чтобы deputy
+                                    // получил снапшот, в котором змейка master'а уже отсутствует.
+                                    // Иначе deputy может поднять симуляцию из более старого State и
+                                    // "оживить" змейку master'а после takeover.
+                                    if let Err(e) = network.broadcast_state(&new_state) {
+                                        eprintln!("[game-loop-net] Failed to broadcast final state before handoff: {}", e);
+                                    }
                                     
                                     // Останавливаем game loop - мы больше не master
                                     running.store(false, Ordering::SeqCst);

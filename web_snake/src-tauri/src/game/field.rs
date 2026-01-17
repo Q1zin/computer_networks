@@ -115,7 +115,6 @@ pub trait GameField: Send + Sync {
     #[allow(dead_code)]
     fn handle_death(&mut self, snake_id: i32);
     fn change_snake_to_zombie(&mut self, player_id: i32);
-    fn remove_player(&mut self, player_id: i32);
     #[allow(dead_code)]
     fn config(&self) -> &GameConfig;
 }
@@ -511,14 +510,6 @@ impl GameField for FieldImpl {
         if let Some(player) = self.players.players.iter_mut().find(|p| p.id == player_id) {
             player.role = NodeRole::Viewer as i32;
         }
-    }
-
-    fn remove_player(&mut self, player_id: i32) {
-        // Удаляем змейку игрока
-        self.snakes.remove(&player_id);
-        // Удаляем игрока из списка
-        self.players.players.retain(|p| p.id != player_id);
-        println!("Player {} removed from field", player_id);
     }
 }
 

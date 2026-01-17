@@ -1365,6 +1365,10 @@ fn process_message(
                     .iter()
                     .any(|p| p.id == sender_id && p.role == NodeRole::Master as i32);
 
+                // ВАЖНО: сначала проверяем, сменился ли мастер, ДО обновления current_master
+                let old_master = *current_master.lock().expect("master mutex poisoned");
+                let master_changed = old_master.map(|om| om != addr).unwrap_or(false);
+
                 if is_state_from_master {
                     *current_master.lock().expect("master mutex poisoned") = Some(addr);
                 }
@@ -1372,7 +1376,13 @@ fn process_message(
                 // Если мы не viewer и нашей змейки больше нет в State - становимся viewer
                 // НО: проверяем, что мы уже были активным игроком (есть в players как не-Viewer),
                 // иначе это может быть первый State после Join, когда змейка ещё не spawn'илась
-                if !is_viewer && my_id != 0 {
+                //
+                // ВАЖНО: при смене мастера (failover) новый мастер поднимает симуляцию из snapshot'а.
+                // Может быть ситуация, когда в первых State от нового мастера наша змейка ещё не появилась
+                // (например, если snapshot был до нашего join). Не считаем это смертью.
+                // Проверяем: если мастер сменился, игнорируем отсутствие змейки в первом State.
+                
+                if !is_viewer && my_id != 0 && !master_changed {
                     let my_snake_alive = state_msg.state.snakes.iter().any(|s| s.player_id == my_id);
                     
                     // Проверяем, есть ли мы в players как активный игрок (не Viewer)
