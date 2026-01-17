@@ -10,7 +10,7 @@ use crate::snakes::{
 use anyhow::{anyhow, Result};
 use protocol::NetworkProtocol;
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -21,6 +21,36 @@ use udp_impl::UdpNetwork;
 
 const GAME_TIMEOUT_SECS: u64 = 5;
 const MULTICAST_ADDR: &str = "239.192.0.4:9192";
+
+fn best_effort_local_ip() -> Option<IpAddr> {
+    // UDP connect doesn't send packets; it only lets the OS pick an egress interface.
+    // We try the multicast group first (LAN-friendly), then a public IP as fallback.
+    let candidates = [MULTICAST_ADDR, "8.8.8.8:80"];
+    for target in candidates {
+        if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+            if sock.connect(target).is_ok() {
+                if let Ok(local) = sock.local_addr() {
+                    let ip = local.ip();
+                    if !ip.is_unspecified() && !ip.is_loopback() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn advertised_ip_from_local(local_ip: IpAddr) -> Option<IpAddr> {
+    if !local_ip.is_unspecified() && !local_ip.is_loopback() {
+        return Some(local_ip);
+    }
+    best_effort_local_ip()
+}
+
+fn is_bad_advertised_ip(ip: &IpAddr) -> bool {
+    ip.is_unspecified() || ip.is_loopback()
+}
 
 /// Неподтверждённое сообщение, ожидающее ACK
 #[derive(Clone, Debug)]
@@ -418,12 +448,8 @@ impl NetworkService {
                                     // Заполняем IP и порт для Master
                                     for p in &mut players_clone.players {
                                         if p.role == NodeRole::Master as i32 {
-                                            let ip = if addr.ip().is_unspecified() {
-                                                "127.0.0.1".to_string()
-                                            } else {
-                                                addr.ip().to_string()
-                                            };
-                                            p.ip_address = Some(ip);
+                                            let advertised_ip = advertised_ip_from_local(addr.ip());
+                                            p.ip_address = advertised_ip.map(|ip| ip.to_string());
                                             p.port = Some(addr.port() as i32);
                                         }
                                     }
@@ -962,15 +988,11 @@ impl NetworkService {
         // Дополнительно: собственный ip/port Master'а (он сам себе сообщений не шлёт, поэтому
         // его нет в known_players как отправителя).
         if let Ok(local_addr) = self.net.get_local_addr() {
-            let ip = if local_addr.ip().is_unspecified() {
-                "127.0.0.1".to_string()
-            } else {
-                local_addr.ip().to_string()
-            };
+            let advertised_ip = advertised_ip_from_local(local_addr.ip()).map(|ip| ip.to_string());
             for p in &mut state_to_send.players.players {
                 if p.role == NodeRole::Master as i32 {
                     if p.ip_address.is_none() {
-                        p.ip_address = Some(ip.clone());
+                        p.ip_address = advertised_ip.clone();
                     }
                     if p.port.is_none() {
                         p.port = Some(local_addr.port() as i32);
@@ -1022,12 +1044,8 @@ impl NetworkService {
         // Заполняем IP и порт для Master в announcement
         for p in &mut players.players {
             if p.role == NodeRole::Master as i32 {
-                let ip = if local_addr.ip().is_unspecified() {
-                    "127.0.0.1".to_string()
-                } else {
-                    local_addr.ip().to_string()
-                };
-                p.ip_address = Some(ip);
+                let advertised_ip = advertised_ip_from_local(local_addr.ip());
+                p.ip_address = advertised_ip.map(|ip| ip.to_string());
                 p.port = Some(local_addr.port() as i32);
             }
         }
@@ -1119,7 +1137,38 @@ fn process_message(
             games.retain(|game| now.duration_since(game.last_seen) < Duration::from_secs(GAME_TIMEOUT_SECS));
 
             for announcement in &announcement_msg.games {
-                let master_from_payload = announcement
+                // Never trust loopback/unspecified IPs from payload (e.g. 127.0.0.1 from a host
+                // bound to 0.0.0.0). Prefer the real packet source address.
+                let mut announcement_fixed = announcement.clone();
+
+                let mut payload_master_port: Option<u16> = None;
+                if let Some(master) = announcement_fixed
+                    .players
+                    .players
+                    .iter_mut()
+                    .find(|p| p.role == NodeRole::Master as i32)
+                {
+                    payload_master_port = master
+                        .port
+                        .and_then(|p| u16::try_from(p).ok())
+                        .filter(|p| *p != 0);
+
+                    if let Some(ip_str) = master.ip_address.as_deref() {
+                        if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                            if is_bad_advertised_ip(&ip) {
+                                master.ip_address = Some(addr.ip().to_string());
+                            }
+                        } else {
+                            // If payload IP is garbage, replace it with sender IP.
+                            master.ip_address = Some(addr.ip().to_string());
+                        }
+                    } else {
+                        // If no IP in payload, fill sender IP for UI/debug.
+                        master.ip_address = Some(addr.ip().to_string());
+                    }
+                }
+
+                let master_from_payload = announcement_fixed
                     .players
                     .players
                     .iter()
@@ -1128,20 +1177,24 @@ fn process_message(
                         let ip = p.ip_address.as_ref()?;
                         let port = p.port?;
                         format!("{}:{}", ip, port).parse::<SocketAddr>().ok()
-                    });
+                    })
+                    .filter(|sa| !is_bad_advertised_ip(&sa.ip()));
 
-                let master_addr = master_from_payload.unwrap_or(addr);
+                // If payload IP is bad but it had a valid port, use sender IP + payload port.
+                let master_addr = master_from_payload
+                    .or_else(|| payload_master_port.map(|p| SocketAddr::new(addr.ip(), p)))
+                    .unwrap_or(addr);
 
                 if let Some(existing) = games
                     .iter_mut()
                     .find(|g| g.announcement.game_name == announcement.game_name)
                 {
-                    existing.announcement = announcement.clone();
+                    existing.announcement = announcement_fixed;
                     existing.master_address = master_addr;
                     existing.last_seen = now;
                 } else {
                     games.push(DiscoveredGame {
-                        announcement: announcement.clone(),
+                        announcement: announcement_fixed,
                         master_address: master_addr,
                         last_seen: now,
                     });
@@ -1197,20 +1250,16 @@ fn process_message(
                         drop(config_guard);
                         
                         let local_addr = net.get_local_addr().ok();
-                        if let Some(addr) = local_addr {
+                        if let Some(local_addr) = local_addr {
                             let players_guard = players.lock().expect("players mutex poisoned");
                             let mut players_clone = players_guard.clone();
                             
                             // Заполняем IP и порт для Master
                             for p in &mut players_clone.players {
                                 if p.role == NodeRole::Master as i32 {
-                                    let ip = if addr.ip().is_unspecified() {
-                                        "127.0.0.1".to_string()
-                                    } else {
-                                        addr.ip().to_string()
-                                    };
-                                    p.ip_address = Some(ip);
-                                    p.port = Some(addr.port() as i32);
+                                    let advertised_ip = advertised_ip_from_local(local_addr.ip());
+                                    p.ip_address = advertised_ip.map(|ip| ip.to_string());
+                                    p.port = Some(local_addr.port() as i32);
                                 }
                             }
                             drop(players_guard);
@@ -1247,7 +1296,7 @@ fn process_message(
                                 )),
                             };
                             
-                            // По ТЗ: ответ на DiscoverMsg отправляется unicast отправителю
+                            // По ТЗ: ответ на DiscoverMsg отправляется unicast отправителю (addr из recv_from)
                             let _ = net.send_unicast(addr, msg);
                             println!("Sent announcement (unicast response to Discover from {})", addr);
                         }
