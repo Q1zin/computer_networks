@@ -113,7 +113,6 @@ onMounted(async () => {
   // Слушаем событие окончания игры (нет master и deputy)
   unlistenGameOver = await listen<string>("game-over", (event) => {
     console.log("Game over:", event.payload);
-    alert("Игра завершена: " + event.payload);
     emit("leave");
   });
   
