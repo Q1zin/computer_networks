@@ -411,7 +411,8 @@ impl GameManager {
             }
         });
 
-        // Подписываемся на событие player-left для удаления игрока из field
+        // Подписываемся на событие player-left: игрок вышел из игры,
+        // его змейка должна стать ZOMBIE, а не удаляться.
         app.listen("player-left", move |event| {
             #[derive(serde::Deserialize)]
             struct LeftEvent {
@@ -421,7 +422,7 @@ impl GameManager {
             if let Ok(left_event) = serde_json::from_str::<LeftEvent>(event.payload()) {
                 let mut field_guard = field_for_left.lock().unwrap();
                 if let Some(field) = field_guard.as_mut() {
-                    field.remove_player(left_event.player_id);
+                    field.change_snake_to_zombie(left_event.player_id);
                 }
             }
         });
